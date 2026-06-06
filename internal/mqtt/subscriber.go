@@ -124,9 +124,14 @@ func NewWithOptions(cfg config.MQTTConfig, handler Handler, clientIDSuffix strin
 			// broker forgot it.
 			ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 			defer cancel()
+			// NoLocal MUST be false on Shared Subscriptions per MQTT 5
+			// spec §4.8.2; mosquitto rejects with reason_code=130
+			// (Protocol Error) otherwise. We keep it false for non-
+			// shared topics too — energystore-v2 isn't its own publisher,
+			// so the NoLocal semantic doesn't matter here.
 			if _, err := cm.Subscribe(ctx, &paho.Subscribe{
 				Subscriptions: []paho.SubscribeOptions{
-					{Topic: topic, QoS: cfg.QoS, NoLocal: true},
+					{Topic: topic, QoS: cfg.QoS},
 				},
 			}); err != nil {
 				logger.Error("subscribe", "err", err, "topic", topic)
