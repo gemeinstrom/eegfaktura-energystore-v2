@@ -8,6 +8,7 @@ import (
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/calc"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/excelexport"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/queryengine"
 )
 
@@ -274,21 +275,70 @@ func (s *Server) handleEEGLastRecordDate(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, map[string]any{"periodEnd": time.UnixMilli(latest).UTC().Format(time.RFC3339)})
 }
 
-// handleExcelExport / handleExcelDownload return 501 until Workstream H
-// lands. The routes are wired so existing operator configs don't need
-// to change.
-func (s *Server) handleExcelExport(w http.ResponseWriter, r *http.Request, _ *auth.PlatformClaims, _ string) {
-	_, errY := strconv.Atoi(r.PathValue("year"))
-	_, errM := strconv.Atoi(r.PathValue("month"))
-	if errY != nil || errM != nil {
-		writeError(w, http.StatusBadRequest, "invalid year/month")
+// handleExcelExport is the v1 monthly path (/eeg/{ecid}/excel/export/{year}/{month}).
+// v1 emails the file; v2 returns the file as the response body. The
+// request body is the ExportCPs JSON.
+func (s *Server) handleExcelExport(w http.ResponseWriter, r *http.Request, _ *auth.PlatformClaims, tenant string) {
+	if s.excel == nil {
+		writeError(w, http.StatusServiceUnavailable, "excel engine not configured")
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "excel export ships with Workstream H")
+	year, err := strconv.Atoi(r.PathValue("year"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid year")
+		return
+	}
+	month, err := strconv.Atoi(r.PathValue("month"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid month")
+		return
+	}
+	ecid := r.PathValue("ecid")
+	var cps excelexport.ExportCPs
+	if err := json.NewDecoder(r.Body).Decode(&cps); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	buf, err := s.excel.ExportEnergyForMonth(r.Context(), tenant, ecid, year, month, &cps)
+	if err != nil {
+		s.logger.Error("excel export", "err", err, "tenant", tenant)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition",
+		`attachment; filename="`+tenant+`-Energie-Report-`+
+			r.PathValue("year")+r.PathValue("month")+`.xlsx"`)
+	_, _ = buf.WriteTo(w)
 }
 
-func (s *Server) handleExcelDownload(w http.ResponseWriter, _ *http.Request, _ *auth.PlatformClaims, _ string) {
-	writeError(w, http.StatusNotImplemented, "excel report download ships with Workstream H")
+// handleExcelDownload is the arbitrary-range path
+// (/eeg/{ecid}/excel/report/download). Body carries start/end (epoch
+// ms) + cps + communityId.
+func (s *Server) handleExcelDownload(w http.ResponseWriter, r *http.Request, _ *auth.PlatformClaims, tenant string) {
+	if s.excel == nil {
+		writeError(w, http.StatusServiceUnavailable, "excel engine not configured")
+		return
+	}
+	ecid := r.PathValue("ecid")
+	var cps excelexport.ExportCPs
+	if err := json.NewDecoder(r.Body).Decode(&cps); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	start := time.UnixMilli(cps.Start)
+	end := time.UnixMilli(cps.End)
+	buf, err := s.excel.ExportEnergyToExcel(r.Context(), tenant, ecid, start, end, &cps)
+	if err != nil {
+		s.logger.Error("excel download", "err", err, "tenant", tenant)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition",
+		`attachment; filename="`+tenant+`-Energy-Report-`+
+			start.Format("20060102")+`_`+end.Format("20060102")+`.xlsx"`)
+	_, _ = buf.WriteTo(w)
 }
 
 // handleQueryRawData is the Basic-Auth /query/rawdata path. Wire-shape

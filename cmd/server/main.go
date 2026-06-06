@@ -30,6 +30,7 @@ import (
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/config"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/counterpoint"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/decode"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/excelexport"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/logging"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/migrate"
@@ -104,6 +105,7 @@ func runServe(logger *slog.Logger) error {
 	cpRepo := counterpoint.NewRepository(store.RawPool(st))
 	qeEngine := queryengine.New(store.RawPool(st), cpRepo)
 	calcEngine := calc.New(store.RawPool(st), cpRepo)
+	excelEngine := excelexport.New(qeEngine, cpRepo)
 
 	// energyHandler ingests EDA energy-data messages: tenant from topic,
 	// ecId from payload.
@@ -150,6 +152,7 @@ func runServe(logger *slog.Logger) error {
 		Auth:        authMW,
 		QueryEngine: qeEngine,
 		Calc:        calcEngine,
+		Excel:       excelEngine,
 	})
 
 	corsHandler := cors.New(cors.Options{
