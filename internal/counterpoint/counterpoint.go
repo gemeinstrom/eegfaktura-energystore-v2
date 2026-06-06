@@ -73,6 +73,61 @@ type CounterPoint struct {
 	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
+// metaTimeLayout matches v1's CounterPointMeta period_start/period_end
+// string format ("DD.MM.YYYY HH:mm:ss"). The customer-web SPA parses
+// against exactly this pattern in src/util/FilterHelper.unit.ts; any
+// other format makes the meter filter fall through to false and
+// downstream features (Excel-Export, period validation) see an empty
+// cps list.
+const metaTimeLayout = "02.01.2006 15:04:05"
+
+// MarshalJSON emits the v1-compat wire shape used by report.meta:
+//
+//	"name":          string
+//	"sourceIdx":     int
+//	"dir":           "CONSUMPTION" | "GENERATION"
+//	"period_start":  "DD.MM.YYYY HH:mm:ss"
+//	"period_end":    "DD.MM.YYYY HH:mm:ss"
+//	"id":            "cpmeta/<year>"   — v1 BadgerDB bucket key
+//	"count":         int               — v1 carried this; v2 omits with 0
+//
+// The v2-native fields (tenantId, ecId, meteringPoint, updatedAt) are
+// kept side-by-side so v2-aware clients still get them. v1 ignored
+// unknown keys.
+func (c *CounterPoint) MarshalJSON() ([]byte, error) {
+	out := struct {
+		ID            string `json:"id,omitempty"`
+		Name          string `json:"name"`
+		SourceIdx     int    `json:"sourceIdx"`
+		Dir           string `json:"dir"`
+		Count         uint16 `json:"count"`
+		PeriodStart   string `json:"period_start"`
+		PeriodEnd     string `json:"period_end"`
+		TenantID      string `json:"tenantId,omitempty"`
+		ECID          string `json:"ecId,omitempty"`
+		MeteringPoint string `json:"meteringPoint,omitempty"`
+		UpdatedAt     string `json:"updatedAt,omitempty"`
+	}{
+		Name:          c.Name,
+		SourceIdx:     c.SourceIdx,
+		Dir:           c.Direction.String(),
+		TenantID:      c.TenantID,
+		ECID:          c.ECID,
+		MeteringPoint: c.MeteringPoint,
+	}
+	if c.PeriodStart != nil {
+		out.PeriodStart = c.PeriodStart.Format(metaTimeLayout)
+		out.ID = fmt.Sprintf("cpmeta/%d", c.PeriodStart.Year())
+	}
+	if c.PeriodEnd != nil {
+		out.PeriodEnd = c.PeriodEnd.Format(metaTimeLayout)
+	}
+	if !c.UpdatedAt.IsZero() {
+		out.UpdatedAt = c.UpdatedAt.Format(time.RFC3339Nano)
+	}
+	return json.Marshal(out)
+}
+
 // payload is the JSONB blob stored in counterpoint_meta.payload. Carries
 // fields beyond the first-class columns so we don't need a migration each
 // time v1 grows a new attribute.

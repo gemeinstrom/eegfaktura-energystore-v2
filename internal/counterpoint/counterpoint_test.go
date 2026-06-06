@@ -2,12 +2,60 @@ package counterpoint
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 )
+
+// TestMarshalJSON_V1WireCompat checks the wire shape consumed by the
+// customer-web SPA: snake_case period_start/period_end with v1's
+// "DD.MM.YYYY HH:mm:ss" format and dir string. Mismatching this breaks
+// FilterHelper.filterActiveMeter → empty cps → empty Excel-Export.
+func TestMarshalJSON_V1WireCompat(t *testing.T) {
+	ps := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pe := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	cp := &CounterPoint{
+		TenantID:      "TE100200",
+		ECID:          "TE100200",
+		MeteringPoint: "AT0010000000000000000010000000001",
+		Direction:     DirectionConsumer,
+		SourceIdx:     0,
+		PeriodStart:   &ps,
+		PeriodEnd:     &pe,
+		Name:          "Anna Berger",
+		UpdatedAt:     time.Date(2026, 6, 6, 19, 0, 53, 0, time.UTC),
+	}
+	b, err := json.Marshal(cp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, want := range []struct{ key, value string }{
+		{"period_start", "01.01.2026 00:00:00"},
+		{"period_end", "01.01.2030 00:00:00"},
+		{"dir", "CONSUMPTION"},
+		{"name", "Anna Berger"},
+		{"id", "cpmeta/2026"},
+	} {
+		if v, _ := got[want.key].(string); v != want.value {
+			t.Errorf("%s: want %q, got %q (full %s)", want.key, want.value, v, b)
+		}
+	}
+	if !strings.Contains(string(b), "\"sourceIdx\":0") {
+		t.Errorf("sourceIdx missing: %s", b)
+	}
+	// Ensure the v2-native shape didn't accidentally leak through.
+	if strings.Contains(string(b), "\"periodStart\"") || strings.Contains(string(b), "\"direction\"") {
+		t.Errorf("v2 camelCase leaked to wire: %s", b)
+	}
+}
 
 func newRepo(t *testing.T) (*Repository, pgxmock.PgxPoolIface) {
 	t.Helper()
