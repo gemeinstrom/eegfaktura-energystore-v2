@@ -121,14 +121,39 @@ func (s *Server) handle(pattern string, h http.HandlerFunc) {
 
 // protect wraps a v1-style JWT-aware handler with auth middleware when
 // auth is enabled. When auth is nil (dev / tests), the inner handler
-// runs with the tenant taken from the X-Tenant header verbatim and a
-// nil claims pointer.
+// resolves the tenant in this order:
+//
+//  1. `X-Tenant` header  (operator service-to-service Convention)
+//  2. `tenant`  header   (v1 customer-web GraphQL Convention, also used
+//                         by the customer-web SPA for REST when running
+//                         against unprotected energystore)
+//  3. `ecid` path segment (last-resort fallback — Backend nutzt
+//                          `tenant = ec_id` als Default-Convention; das
+//                          v1-Backend logged exakt das ebenfalls als
+//                          "Query EEG with TENANT: TE100200")
+//
+// Sonst bleibt der Tenant leer und alle DB-Lookups gegen Hypertable
+// energy_data + Tabelle counterpoint_meta finden nichts → SPA crasht
+// auf `null.reduce(...)`. Siehe Memory `feedback_v2_tenant_from_jwt`.
+func resolveTenant(r *http.Request) string {
+	if t := r.Header.Get("X-Tenant"); t != "" {
+		return t
+	}
+	if t := r.Header.Get("tenant"); t != "" {
+		return t
+	}
+	if t := r.PathValue("ecid"); t != "" {
+		return t
+	}
+	return ""
+}
+
 func (s *Server) protect(h auth.HandlerFunc) http.HandlerFunc {
 	if s.auth != nil {
 		return s.auth.ProtectApp(h)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		h(w, r, nil, r.Header.Get("X-Tenant"))
+		h(w, r, nil, resolveTenant(r))
 	}
 }
 
@@ -138,7 +163,7 @@ func (s *Server) protectAPI(h auth.HandlerFunc) http.HandlerFunc {
 		return s.auth.ProtectAPI(h)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		h(w, r, nil, r.Header.Get("X-Tenant"))
+		h(w, r, nil, resolveTenant(r))
 	}
 }
 
