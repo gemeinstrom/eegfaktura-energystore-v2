@@ -129,9 +129,9 @@ func (m *Middleware) ProtectApp(next HandlerFunc) http.HandlerFunc {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		tenant := r.Header.Get("X-Tenant")
-		if !claims.HasTenant(tenant) {
-			m.logger.Warn("tenant not in claims", "tenant", tenant)
+		tenant, ok := pickTenant(r, claims)
+		if !ok {
+			m.logger.Warn("tenant not in claims", "tenant", tenant, "claim_tenants", claims.Tenants)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -165,9 +165,9 @@ func (m *Middleware) ProtectAPI(next HandlerFunc) http.HandlerFunc {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		tenant := r.Header.Get("X-Tenant")
-		if !claims.HasTenant(tenant) {
-			m.logger.Warn("tenant not in claims", "tenant", tenant)
+		tenant, ok := pickTenant(r, claims)
+		if !ok {
+			m.logger.Warn("tenant not in claims", "tenant", tenant, "claim_tenants", claims.Tenants)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -202,12 +202,9 @@ func (m *Middleware) GQL(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		tenant := r.Header.Get("tenant")
-		if tenant == "" {
-			tenant = r.Header.Get("X-Tenant")
-		}
-		if !claims.HasTenant(tenant) {
-			m.logger.Warn("GQL: tenant not in claims", "tenant", tenant)
+		tenant, ok := pickTenant(r, claims)
+		if !ok {
+			m.logger.Warn("GQL: tenant not in claims", "tenant", tenant, "claim_tenants", claims.Tenants)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -221,6 +218,47 @@ func (m *Middleware) GQL(next http.Handler) http.Handler {
 func ForContextTenant(ctx context.Context) string {
 	v, _ := ctx.Value(tenantCtxKey).(string)
 	return v
+}
+
+// pickTenant resolves which tenant to use for this request and verifies
+// it against the JWT's `tenant` claim array. Resolution order:
+//
+//  1. `X-Tenant` header                — operator service-to-service
+//  2. `tenant` header  (lowercase)     — v1 customer-web GraphQL Convention
+//  3. `ecid` URL path segment          — Backend Convention tenant = ec_id
+//  4. exactly-one tenant in JWT claim  — single-tenant user, unambiguous
+//
+// Once a candidate is chosen, it MUST appear in claims.Tenants. Returns
+// (resolved, true) on success or ("", false) when no candidate matches
+// — the caller responds 403.
+//
+// This unblocks the Frontend-to-energystore call: the customer-web SPA
+// does not send X-Tenant (the JWT is the single source of truth), but
+// v1's middleware ported 1:1 still expected the header. Without the
+// fallback to claim-or-path, every authenticated /eeg/v2/* call from
+// the browser would 403.
+func pickTenant(r *http.Request, claims *PlatformClaims) (string, bool) {
+	// If the caller EXPLICITLY names a tenant (header or URL path), that
+	// is the security boundary — we must not silently substitute another
+	// tenant from the claims, even if there is only one.
+	for _, candidate := range []string{
+		r.Header.Get("X-Tenant"),
+		r.Header.Get("tenant"),
+		r.PathValue("ecid"),
+	} {
+		if candidate == "" {
+			continue
+		}
+		if claims.HasTenant(candidate) {
+			return candidate, true
+		}
+		return candidate, false
+	}
+	// No explicit candidate: a single-tenant user is unambiguous.
+	if len(claims.Tenants) == 1 && claims.Tenants[0] != "" {
+		return claims.Tenants[0], true
+	}
+	return "", false
 }
 
 var (

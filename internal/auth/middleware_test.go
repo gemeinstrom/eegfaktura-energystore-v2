@@ -151,6 +151,36 @@ func TestProtectApp_TenantNotInClaims(t *testing.T) {
 	}
 }
 
+func TestProtectApp_SingleTenantClaimFallback_NoHeader(t *testing.T) {
+	// Customer-web sends no X-Tenant. The JWT carries exactly one
+	// tenant. ProtectApp must accept and use it.
+	m := New(&fakeVerifier{tok: &fakeIDToken{claims: PlatformClaims{Tenants: []string{"VFEEG"}}}}, nil, Options{})
+	r := httptest.NewRequest("GET", "/x", nil)
+	r.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	m.ProtectApp(okHandler()).ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (single-tenant fallback), got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "VFEEG") {
+		t.Fatalf("expected VFEEG used, got %q", rec.Body.String())
+	}
+}
+
+func TestProtectApp_ExplicitTenantMismatchStillForbidden(t *testing.T) {
+	// Even when the JWT has a single tenant, an EXPLICIT but wrong
+	// X-Tenant must 403 — silent substitution would be a security hole.
+	m := New(&fakeVerifier{tok: &fakeIDToken{claims: PlatformClaims{Tenants: []string{"VFEEG"}}}}, nil, Options{})
+	r := httptest.NewRequest("GET", "/x", nil)
+	r.Header.Set("Authorization", "Bearer x")
+	r.Header.Set("X-Tenant", "OTHER")
+	rec := httptest.NewRecorder()
+	m.ProtectApp(okHandler()).ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+}
+
 func TestProtectAPI_OK(t *testing.T) {
 	m := New(nil, &fakePasswordVerifier{
 		tok: &fakeIDToken{claims: PlatformClaims{Tenants: []string{"VFEEG"}}},

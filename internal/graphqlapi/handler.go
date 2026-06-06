@@ -227,11 +227,24 @@ func respondGraphQL(w http.ResponseWriter, res *graphql.Result) {
 	_ = json.NewEncoder(w).Encode(res)
 }
 
+// resolveTenantArg picks the tenant from the GraphQL args, falling back
+// to ecId when the customer-web SPA sends an empty/missing tenant. The
+// Pilot Convention is tenant == ec_id (mirrors the backend `Query EEG
+// with TENANT: TE100200` log line). See [[feedback_v2_tenant_from_jwt]]
+// for the broader story.
+func resolveTenantArg(p graphql.ResolveParams) (tenant, ecid string) {
+	tenant, _ = p.Args["tenant"].(string)
+	ecid, _ = p.Args["ecId"].(string)
+	if tenant == "" {
+		tenant = ecid
+	}
+	return tenant, ecid
+}
+
 // resolveLastEnergyDate maps to v1 services.GetLastEnergyEntry: returns
 // the most recent slot timestamp across the EC.
 func (e *Engine) resolveLastEnergyDate(p graphql.ResolveParams) (any, error) {
-	tenant, _ := p.Args["tenant"].(string)
-	ecid, _ := p.Args["ecId"].(string)
+	tenant, ecid := resolveTenantArg(p)
 	if e.qe == nil {
 		return "", errors.New("query engine not configured")
 	}
@@ -253,7 +266,7 @@ func (e *Engine) resolveLastEnergyDate(p graphql.ResolveParams) (any, error) {
 
 // resolveReport maps to v1 calculation.EnergyReport.
 func (e *Engine) resolveReport(p graphql.ResolveParams) (any, error) {
-	tenant, _ := p.Args["tenant"].(string)
+	tenant, _ := resolveTenantArg(p)
 	year, _ := p.Args["year"].(int)
 	segment, _ := p.Args["segment"].(int)
 	period, _ := p.Args["period"].(string)
@@ -265,8 +278,7 @@ func (e *Engine) resolveReport(p graphql.ResolveParams) (any, error) {
 
 // resolveSingleUpload runs the XLSX importer on the uploaded file.
 func (e *Engine) resolveSingleUpload(p graphql.ResolveParams) (any, error) {
-	tenant, _ := p.Args["tenant"].(string)
-	ecid, _ := p.Args["ecId"].(string)
+	tenant, ecid := resolveTenantArg(p)
 	sheet, _ := p.Args["sheet"].(string)
 	if e.calc == nil || e.repo == nil || e.store == nil {
 		return false, errors.New("dependencies not configured")
