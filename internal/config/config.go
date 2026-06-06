@@ -11,6 +11,24 @@ type Config struct {
 	HTTP HTTPConfig
 	DB   DBConfig
 	MQTT MQTTConfig
+	Auth AuthConfig
+}
+
+type AuthConfig struct {
+	// AppIssuer / AppClientID are used by ProtectApp + GQL (bearer JWT
+	// verify against the customer realm).
+	AppIssuer   string
+	AppClientID string
+
+	// APIIssuer / APIClientID / APIClientSecret drive the password-grant
+	// bridge used by ProtectAPI (Basic-Auth).
+	APIIssuer       string
+	APIClientID     string
+	APIClientSecret string
+
+	// Enabled gates whether main wires Protect* into the API. Off by
+	// default so dev environments without Keycloak still come up.
+	Enabled bool
 }
 
 type HTTPConfig struct {
@@ -50,6 +68,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("mqtt.qos", byte(1))
 	viper.SetDefault("mqtt.keep_alive", 30)
 	viper.SetDefault("mqtt.connect_timeout", 10)
+	viper.SetDefault("auth.enabled", false)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, notFound := err.(viper.ConfigFileNotFoundError); !notFound {
@@ -77,6 +96,14 @@ func Load() (*Config, error) {
 			KeepAlive:      viper.GetInt("mqtt.keep_alive"),
 			ConnectTimeout: viper.GetInt("mqtt.connect_timeout"),
 		},
+		Auth: AuthConfig{
+			Enabled:         viper.GetBool("auth.enabled"),
+			AppIssuer:       viper.GetString("auth.app_issuer"),
+			AppClientID:     viper.GetString("auth.app_client_id"),
+			APIIssuer:       viper.GetString("auth.api_issuer"),
+			APIClientID:     viper.GetString("auth.api_client_id"),
+			APIClientSecret: viper.GetString("auth.api_client_secret"),
+		},
 	}
 
 	if cfg.DB.DSN == "" {
@@ -84,6 +111,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.MQTT.BrokerURL == "" {
 		return nil, fmt.Errorf("config: mqtt.broker_url is required")
+	}
+	if cfg.Auth.Enabled && (cfg.Auth.AppIssuer == "" || cfg.Auth.AppClientID == "") {
+		return nil, fmt.Errorf("config: auth.enabled requires auth.app_issuer + auth.app_client_id")
 	}
 	return cfg, nil
 }

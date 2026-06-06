@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/api"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/config"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/decode"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/logging"
@@ -91,6 +92,13 @@ func runServe(logger *slog.Logger) error {
 
 	mtr := metrics.New()
 	mtr.MQTTConnected.Set(0)
+
+	authMW, err := buildAuth(ctx, cfg.Auth, logger)
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	_ = authMW // wired into REST endpoints in workstream G; constructed
+	// here so misconfiguration surfaces at startup, not at first request.
 
 	handler := func(hctx context.Context, topic string, payload []byte) error {
 		start := time.Now()
@@ -211,6 +219,30 @@ func writeDLQ(ctx context.Context, st *store.Store, mtr *metrics.Metrics, logger
 		return
 	}
 	mtr.MQTTDLQWrites.Inc()
+}
+
+// buildAuth constructs the auth middleware bundle. When auth is disabled
+// it returns nil — the REST endpoints will run unauthenticated (dev
+// convenience). When enabled, the App issuer is mandatory; the API
+// issuer is optional (some clusters don't expose ProtectAPI).
+func buildAuth(ctx context.Context, cfg config.AuthConfig, logger *slog.Logger) (*auth.Middleware, error) {
+	if !cfg.Enabled {
+		logger.Warn("auth disabled (ESV2_AUTH_ENABLED=false) — endpoints will be unprotected")
+		return nil, nil
+	}
+	appKC, err := auth.NewKeycloakClient(ctx, cfg.AppIssuer, cfg.AppClientID, "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("app KC: %w", err)
+	}
+	var apiKC *auth.KeycloakClient
+	if cfg.APIIssuer != "" && cfg.APIClientID != "" {
+		apiKC, err = auth.NewKeycloakClient(ctx, cfg.APIIssuer, cfg.APIClientID, cfg.APIClientSecret, nil)
+		if err != nil {
+			return nil, fmt.Errorf("api KC: %w", err)
+		}
+	}
+	logger.Info("auth enabled", "app_issuer", cfg.AppIssuer, "api_issuer", cfg.APIIssuer)
+	return auth.FromKeycloak(appKC, apiKC, auth.Options{Logger: logger}), nil
 }
 
 // tenantFromTopic extracts the tenant from a broker topic of the form
