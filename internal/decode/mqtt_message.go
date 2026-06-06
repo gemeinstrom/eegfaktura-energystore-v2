@@ -53,17 +53,30 @@ type MqttEnergyResponse struct {
 }
 
 // QoVForMethod maps the v1 quality marker to v2's qov SMALLINT column.
-// 0 = raw (L1), 1 = replaced (L2), 2 = interpolated, 9 = unknown.
+//
+// Mirrors v1 utils.CastQoVStringToInt (calculation/utils/counterpoint.go:70):
+//
+//	"L1" → 1  measured  (Netzbetreiber-Echtwert; the dominant case in prod)
+//	"L2" → 2  replaced  (rendered yellow in Excel)
+//	"L3" → 3  estimated/interpolated (rendered red in Excel)
+//	other → 0 unknown   (treated as "no value" by the Excel renderer —
+//	                    sheet_helpers.go:setCell falls through to an
+//	                    empty cell, which is the correct semantic for
+//	                    a slot whose quality marker we can't trust.)
+//
+// Earlier v2 versions emitted 0/1/2/9 here, which made every measured
+// slot land in the DB with qov=0 → every downstream Excel-Export came
+// out empty (see pilot 2026-06-06 incident).
 func QoVForMethod(method string) int16 {
 	switch method {
 	case "L1":
-		return 0
-	case "L2":
 		return 1
-	case "L3":
+	case "L2":
 		return 2
+	case "L3":
+		return 3
 	default:
-		return 9
+		return 0
 	}
 }
 

@@ -53,7 +53,7 @@ func TestIngestHandlerEnergy_OK(t *testing.T) {
 	exp := mock.ExpectBatch()
 	exp.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "TE100200", "AT00100", "1-1:1.9.0 G.01",
-			pgxmock.AnyArg(), float64(0.118), int16(0)).
+			pgxmock.AnyArg(), float64(0.118), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 
 	h := makeIngestHandler(st, mtr, logger, "energy", "")
@@ -81,7 +81,7 @@ func TestIngestHandlerInverter_OverridesECID(t *testing.T) {
 	exp := mock.ExpectBatch()
 	exp.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "inverter", "AT00100", "1-1:1.9.0 G.01",
-			pgxmock.AnyArg(), float64(0.5), int16(0)).
+			pgxmock.AnyArg(), float64(0.5), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 
 	h := makeIngestHandler(st, mtr, slog.Default(), "inverter", "inverter")
