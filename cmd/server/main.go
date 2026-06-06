@@ -26,12 +26,15 @@ import (
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/api"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/calc"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/config"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/counterpoint"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/decode"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/logging"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/migrate"
 	mqttsub "github.com/gemeinstrom/eegfaktura-energystore-v2/internal/mqtt"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/queryengine"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
 )
 
@@ -97,8 +100,10 @@ func runServe(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
-	_ = authMW // wired into REST endpoints in workstream G; constructed
-	// here so misconfiguration surfaces at startup, not at first request.
+
+	cpRepo := counterpoint.NewRepository(store.RawPool(st))
+	qeEngine := queryengine.New(store.RawPool(st), cpRepo)
+	calcEngine := calc.New(store.RawPool(st), cpRepo)
 
 	// energyHandler ingests EDA energy-data messages: tenant from topic,
 	// ecId from payload.
@@ -139,9 +144,12 @@ func runServe(logger *slog.Logger) error {
 	}
 
 	apiSrv := api.NewWithOptions(st, api.Options{
-		Logger:  logger,
-		Metrics: mtr,
-		MQTT:    energySub,
+		Logger:      logger,
+		Metrics:     mtr,
+		MQTT:        energySub,
+		Auth:        authMW,
+		QueryEngine: qeEngine,
+		Calc:        calcEngine,
 	})
 
 	corsHandler := cors.New(cors.Options{
