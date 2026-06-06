@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -68,6 +69,12 @@ type MQTTInverterConfig struct {
 // Env vars override file values.
 func Load() (*Config, error) {
 	viper.SetEnvPrefix("ESV2")
+	// Without an EnvKeyReplacer, viper looks for env var "ESV2_DB.DSN"
+	// when the config key is "db.dsn" — the literal dot prevents the
+	// env lookup. Map dots and dashes to underscores so ESV2_DB_DSN
+	// resolves to db.dsn (and ESV2_MQTT_INVERTER_TOPIC_PATTERN to
+	// mqtt.inverter.topic_pattern).
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	viper.AutomaticEnv()
 
 	viper.SetDefault("http.listen_addr", ":8080")
@@ -81,6 +88,22 @@ func Load() (*Config, error) {
 	viper.SetDefault("mqtt.connect_timeout", 10)
 	viper.SetDefault("mqtt.inverter.share_group", "energystore-inverter")
 	viper.SetDefault("auth.enabled", false)
+
+	// viper's AutomaticEnv only binds env vars for keys it knows about.
+	// Keys that don't have a SetDefault must be BindEnv'd explicitly,
+	// otherwise GetString("db.dsn") returns "" even when ESV2_DB_DSN is
+	// set in the environment.
+	for _, key := range []string{
+		"db.dsn",
+		"db.statement_cache",
+		"mqtt.broker_url",
+		"mqtt.topic_pattern",
+		"mqtt.inverter.topic_pattern",
+		"auth.app_issuer", "auth.app_client_id",
+		"auth.api_issuer", "auth.api_client_id", "auth.api_client_secret",
+	} {
+		_ = viper.BindEnv(key)
+	}
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, notFound := err.(viper.ConfigFileNotFoundError); !notFound {
