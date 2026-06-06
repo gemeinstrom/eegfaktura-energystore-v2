@@ -4,8 +4,9 @@ go 1.26
 
 require (
 	github.com/coreos/go-oidc/v3 v3.18.0
-	github.com/eclipse/paho.mqtt.golang v1.5.1
+	github.com/eclipse/paho.golang v0.23.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/graphql-go/graphql v0.8.1
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/pashagolub/pgxmock/v4 v4.9.0
 	github.com/prometheus/client_golang v1.23.2
@@ -21,8 +22,6 @@ require (
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/graphql-go/graphql v0.8.1 // indirect
-	github.com/graphql-go/handler v0.2.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
