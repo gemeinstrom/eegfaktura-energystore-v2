@@ -83,7 +83,18 @@ func (p *participantConsumer) flushDay(day time.Time) error {
 					continue
 				}
 				if m.Report == nil {
-					m.SetReport(&Report{})
+					// v1-parity: initialize all four intermediate slices as
+					// empty arrays (not nil). Go marshals nil slices to JSON
+					// `null` which crashes the SPA's `.reduce(...)` call —
+					// the frontend expects `[]` for empty time-series.
+					m.SetReport(&Report{
+						Intermediate: IntermediateRecord{
+							Consumption: []float64{},
+							Utilization: []float64{},
+							Allocation:  []float64{},
+							Production:  []float64{},
+						},
+					})
 				}
 				switch cp.Direction {
 				case counterpoint.DirectionConsumer:
