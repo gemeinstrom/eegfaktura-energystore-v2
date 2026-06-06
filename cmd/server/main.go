@@ -100,47 +100,16 @@ func runServe(logger *slog.Logger) error {
 	_ = authMW // wired into REST endpoints in workstream G; constructed
 	// here so misconfiguration surfaces at startup, not at first request.
 
-	handler := func(hctx context.Context, topic string, payload []byte) error {
-		start := time.Now()
-		defer func() {
-			mtr.MQTTUpsertDuration.Observe(time.Since(start).Seconds())
-		}()
-
-		tenant := tenantFromTopic(topic)
-		if tenant == "" {
-			err := fmt.Errorf("cannot extract tenant from topic %q", topic)
-			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
-			mtr.MQTTMessagesTotal.WithLabelValues("decode_error").Inc()
-			mtr.MQTTDecodeErrors.Inc()
-			return err
-		}
-
-		slots, err := decode.DecodeSlots(tenant, payload)
-		if err != nil {
-			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
-			mtr.MQTTMessagesTotal.WithLabelValues("decode_error").Inc()
-			mtr.MQTTDecodeErrors.Inc()
-			return fmt.Errorf("decode: %w", err)
-		}
-
-		mtr.MQTTUpsertBatchSize.Observe(float64(len(slots)))
-
-		if len(slots) == 0 {
-			mtr.MQTTMessagesTotal.WithLabelValues("ok").Inc()
-			return nil
-		}
-		if err := st.UpsertSlots(hctx, slots); err != nil {
-			writeDLQ(hctx, st, mtr, logger, topic, "upsert", err.Error(), payload)
-			mtr.MQTTMessagesTotal.WithLabelValues("upsert_error").Inc()
-			mtr.MQTTUpsertErrors.Inc()
-			return fmt.Errorf("upsert: %w", err)
-		}
-		mtr.MQTTMessagesTotal.WithLabelValues("ok").Inc()
-		return nil
-	}
+	// energyHandler ingests EDA energy-data messages: tenant from topic,
+	// ecId from payload.
+	energyHandler := makeIngestHandler(st, mtr, logger, "energy", "")
+	// inverterHandler ingests PV-inverter messages: tenant from topic,
+	// ecId hard-coded to "inverter" (mirrors v1 importEnergyV2 call
+	// site).
+	inverterHandler := makeIngestHandler(st, mtr, logger, "inverter", "inverter")
 
 	hostname, _ := os.Hostname()
-	sub, err := mqttsub.NewWithOptions(cfg.MQTT, handler, hostname, mqttsub.Options{
+	energySub, err := mqttsub.NewWithOptions(cfg.MQTT, energyHandler, hostname+"-energy", mqttsub.Options{
 		Logger: logger,
 		OnConnectionChange: func(connected bool) {
 			if connected {
@@ -151,13 +120,28 @@ func runServe(logger *slog.Logger) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("mqtt: %w", err)
+		return fmt.Errorf("mqtt energy: %w", err)
+	}
+
+	// Optional second subscription for PV-inverter messages. Disabled
+	// unless cfg.MQTT.Inverter.TopicPattern is set.
+	var inverterSub *mqttsub.Subscriber
+	if cfg.MQTT.Inverter.TopicPattern != "" {
+		invCfg := cfg.MQTT
+		invCfg.TopicPattern = cfg.MQTT.Inverter.TopicPattern
+		invCfg.ShareGroup = cfg.MQTT.Inverter.ShareGroup
+		inverterSub, err = mqttsub.NewWithOptions(invCfg, inverterHandler, hostname+"-inverter", mqttsub.Options{
+			Logger: logger,
+		})
+		if err != nil {
+			return fmt.Errorf("mqtt inverter: %w", err)
+		}
 	}
 
 	apiSrv := api.NewWithOptions(st, api.Options{
 		Logger:  logger,
 		Metrics: mtr,
-		MQTT:    sub,
+		MQTT:    energySub,
 	})
 
 	corsHandler := cors.New(cors.Options{
@@ -188,12 +172,23 @@ func runServe(logger *slog.Logger) error {
 	})
 
 	g.Go(func() error {
-		logger.Info("mqtt: starting subscriber")
-		if err := sub.Start(gctx); err != nil && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("mqtt: %w", err)
+		logger.Info("mqtt: starting energy subscriber")
+		if err := energySub.Start(gctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("mqtt energy: %w", err)
 		}
 		return nil
 	})
+
+	if inverterSub != nil {
+		g.Go(func() error {
+			logger.Info("mqtt: starting inverter subscriber",
+				"topic", cfg.MQTT.Inverter.TopicPattern)
+			if err := inverterSub.Start(gctx); err != nil && !errors.Is(err, context.Canceled) {
+				return fmt.Errorf("mqtt inverter: %w", err)
+			}
+			return nil
+		})
+	}
 
 	g.Go(func() error {
 		<-gctx.Done()
@@ -207,6 +202,61 @@ func runServe(logger *slog.Logger) error {
 	}
 	logger.Info("shutdown complete")
 	return nil
+}
+
+// makeIngestHandler returns the MQTT subscription callback that decodes
+// payload, runs UpsertSlots, and emits metrics + DLQ for failures.
+// The `source` label distinguishes energy vs inverter in metrics; the
+// optional `ecidOverride` (used only by the inverter pipeline — mirrors
+// v1's hard-coded "inverter" ecId in calculation/mqttimporter.go:54) is
+// applied to every slot after decode so the row lands in a deterministic
+// (tenant, "inverter") namespace.
+func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logger,
+	source, ecidOverride string) mqttsub.Handler {
+	return func(hctx context.Context, topic string, payload []byte) error {
+		start := time.Now()
+		defer func() {
+			mtr.MQTTUpsertDuration.Observe(time.Since(start).Seconds())
+		}()
+
+		tenant := tenantFromTopic(topic)
+		if tenant == "" {
+			err := fmt.Errorf("cannot extract tenant from topic %q", topic)
+			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues(source, "decode_error").Inc()
+			mtr.MQTTDecodeErrors.Inc()
+			return err
+		}
+
+		slots, err := decode.DecodeSlots(tenant, payload)
+		if err != nil {
+			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues(source, "decode_error").Inc()
+			mtr.MQTTDecodeErrors.Inc()
+			return fmt.Errorf("decode: %w", err)
+		}
+
+		if ecidOverride != "" {
+			for i := range slots {
+				slots[i].ECID = ecidOverride
+			}
+		}
+
+		mtr.MQTTUpsertBatchSize.Observe(float64(len(slots)))
+
+		if len(slots) == 0 {
+			mtr.MQTTMessagesTotal.WithLabelValues(source, "ok").Inc()
+			return nil
+		}
+		if err := st.UpsertSlots(hctx, slots); err != nil {
+			writeDLQ(hctx, st, mtr, logger, topic, "upsert", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues(source, "upsert_error").Inc()
+			mtr.MQTTUpsertErrors.Inc()
+			return fmt.Errorf("upsert: %w", err)
+		}
+		mtr.MQTTMessagesTotal.WithLabelValues(source, "ok").Inc()
+		return nil
+	}
 }
 
 // writeDLQ logs + writes the failed payload, swallowing DLQ-write errors

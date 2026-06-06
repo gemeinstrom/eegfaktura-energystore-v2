@@ -51,6 +51,17 @@ type MQTTConfig struct {
 	QoS             byte
 	KeepAlive       int
 	ConnectTimeout  int
+
+	// Inverter is the second subscription for PV-Wechselrichter-Daten.
+	// Disabled (empty TopicPattern) by default; mirrors v1's separate
+	// `mqtt.inverterSubscriptionTopic`.
+	Inverter MQTTInverterConfig
+}
+
+type MQTTInverterConfig struct {
+	// TopicPattern enables the inverter subscription when non-empty.
+	TopicPattern string
+	ShareGroup   string
 }
 
 // Load reads configuration from viper sources (config file + env).
@@ -68,6 +79,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("mqtt.qos", byte(1))
 	viper.SetDefault("mqtt.keep_alive", 30)
 	viper.SetDefault("mqtt.connect_timeout", 10)
+	viper.SetDefault("mqtt.inverter.share_group", "energystore-inverter")
 	viper.SetDefault("auth.enabled", false)
 
 	if err := viper.ReadInConfig(); err != nil {
@@ -95,6 +107,10 @@ func Load() (*Config, error) {
 			QoS:            byte(viper.GetInt("mqtt.qos")),
 			KeepAlive:      viper.GetInt("mqtt.keep_alive"),
 			ConnectTimeout: viper.GetInt("mqtt.connect_timeout"),
+			Inverter: MQTTInverterConfig{
+				TopicPattern: viper.GetString("mqtt.inverter.topic_pattern"),
+				ShareGroup:   viper.GetString("mqtt.inverter.share_group"),
+			},
 		},
 		Auth: AuthConfig{
 			Enabled:         viper.GetBool("auth.enabled"),

@@ -104,7 +104,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	defer mock.Close()
 	mtr := metrics.New()
 	// Touch a labelled CounterVec so the series is exported.
-	mtr.MQTTMessagesTotal.WithLabelValues("ok").Inc()
+	mtr.MQTTMessagesTotal.WithLabelValues("energy", "ok").Inc()
 	srv := NewWithOptions(store.FromPool(mock), Options{Metrics: mtr})
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()

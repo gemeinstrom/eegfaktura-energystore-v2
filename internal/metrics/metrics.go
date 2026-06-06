@@ -42,9 +42,9 @@ func New() *Metrics {
 		MQTTMessagesTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "esv2", Subsystem: "mqtt",
-				Name: "messages_total", Help: "MQTT messages handled, by result.",
+				Name: "messages_total", Help: "MQTT messages handled, by source + result.",
 			},
-			[]string{"result"}, // ok | decode_error | upsert_error
+			[]string{"source", "result"}, // source: energy|inverter, result: ok|decode_error|upsert_error
 		),
 		MQTTDecodeErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "esv2", Subsystem: "mqtt",
