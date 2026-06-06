@@ -22,6 +22,7 @@ import (
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/calc"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/excelexport"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/queryengine"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
@@ -40,6 +41,7 @@ type Options struct {
 	Auth        *auth.Middleware
 	QueryEngine *queryengine.Engine
 	Calc        *calc.Engine
+	Excel       *excelexport.Engine
 }
 
 type Server struct {
@@ -51,6 +53,7 @@ type Server struct {
 	auth    *auth.Middleware
 	qe      *queryengine.Engine
 	calc    *calc.Engine
+	excel   *excelexport.Engine
 }
 
 // New keeps the bare-minimum constructor for tests that don't need
@@ -74,6 +77,7 @@ func NewWithOptions(s *store.Store, opts Options) *Server {
 		auth:    opts.Auth,
 		qe:      opts.QueryEngine,
 		calc:    opts.Calc,
+		excel:   opts.Excel,
 	}
 	srv.routes()
 	return srv

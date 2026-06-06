@@ -76,14 +76,14 @@ func TestEEG_LoadCurve_EmptyRange(t *testing.T) {
 	}
 }
 
-func TestEEG_ExcelExport_NotImplemented(t *testing.T) {
-	srv, _ := newFullServer(t)
+func TestEEG_ExcelExport_NoExcelEngine(t *testing.T) {
+	srv, _ := newFullServer(t) // no Excel engine injected
 	req := httptest.NewRequest(http.MethodPost, "/eeg/TE100200/excel/export/2026/06", nil)
 	req.Header.Set("X-Tenant", "vfeeg")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d", rec.Code)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
 	}
 }
 
