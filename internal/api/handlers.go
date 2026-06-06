@@ -1,13 +1,15 @@
 // Package api wires the HTTP/REST endpoints for energystore-v2.
 //
-// Scope of this iteration:
-//   - /healthz, /readyz                                    process probes
-//   - /metrics                                             Prometheus
-//   - GET /api/v1/energy/{tenant}/{ec}/range               raw slot range
-//   - GET /api/v1/energy/{tenant}/{ec}/last-record-date    max(ts) per MP+code
+// Scope:
+//   - /healthz, /readyz, /metrics — process probes + Prometheus
+//   - /api/v1/energy/{tenant}/{ec}/range, .../last-record-date
+//     thin v2-native endpoints (slot range, last record date)
+//   - /eeg/* and /eeg/v2/{ecid}/* — v1-parity REST surface (Workstream G)
+//   - /query/* — Basic-Auth-protected query API (v1 parity)
 //
-// Aggregation / chart / billing endpoints from v1 are tracked in
-// docs/parity-roadmap.md (workstreams E/F/G/H/I).
+// Excel endpoints (POST /eeg/{ecid}/excel/...) return 501 until
+// Workstream H lands; the route is in place so external configs don't
+// have to change.
 package api
 
 import (
@@ -18,21 +20,26 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/calc"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/queryengine"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
 )
 
 // HealthProvider exposes runtime readiness signals beyond the DB pool.
-// Subscriber implements it; tests can substitute.
 type HealthProvider interface {
 	Connected() bool
 }
 
 // Options groups the optional dependencies; nil-safe defaults apply.
 type Options struct {
-	Logger  *slog.Logger
-	Metrics *metrics.Metrics
-	MQTT    HealthProvider
+	Logger      *slog.Logger
+	Metrics     *metrics.Metrics
+	MQTT        HealthProvider
+	Auth        *auth.Middleware
+	QueryEngine *queryengine.Engine
+	Calc        *calc.Engine
 }
 
 type Server struct {
@@ -41,15 +48,18 @@ type Server struct {
 	logger  *slog.Logger
 	metrics *metrics.Metrics
 	mqtt    HealthProvider
+	auth    *auth.Middleware
+	qe      *queryengine.Engine
+	calc    *calc.Engine
 }
 
-// New keeps the old signature for callers/tests that don't need
-// observability wiring.
+// New keeps the bare-minimum constructor for tests that don't need
+// observability or the calc/queryengine stack.
 func New(s *store.Store) *Server {
 	return NewWithOptions(s, Options{})
 }
 
-// NewWithOptions wires metrics, slog and MQTT health into the server.
+// NewWithOptions wires everything into the server.
 func NewWithOptions(s *store.Store, opts Options) *Server {
 	logger := opts.Logger
 	if logger == nil {
@@ -61,6 +71,9 @@ func NewWithOptions(s *store.Store, opts Options) *Server {
 		logger:  logger.With("component", "api"),
 		metrics: opts.Metrics,
 		mqtt:    opts.MQTT,
+		auth:    opts.Auth,
+		qe:      opts.QueryEngine,
+		calc:    opts.Calc,
 	}
 	srv.routes()
 	return srv
@@ -72,9 +85,9 @@ func (s *Server) routes() {
 	s.handle("GET /api/v1/energy/{tenant}/{ec}/range", s.handleRange)
 	s.handle("GET /api/v1/energy/{tenant}/{ec}/last-record-date", s.handleLastRecordDate)
 	if s.metrics != nil {
-		// /metrics is intentionally NOT instrumented (would recurse).
 		s.mux.Handle("GET /metrics", s.metrics.Handler())
 	}
+	s.eegRoutes()
 }
 
 func (s *Server) handle(pattern string, h http.HandlerFunc) {
@@ -83,6 +96,29 @@ func (s *Server) handle(pattern string, h http.HandlerFunc) {
 		return
 	}
 	s.mux.HandleFunc(pattern, h)
+}
+
+// protect wraps a v1-style JWT-aware handler with auth middleware when
+// auth is enabled. When auth is nil (dev / tests), the inner handler
+// runs with the tenant taken from the X-Tenant header verbatim and a
+// nil claims pointer.
+func (s *Server) protect(h auth.HandlerFunc) http.HandlerFunc {
+	if s.auth != nil {
+		return s.auth.ProtectApp(h)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		h(w, r, nil, r.Header.Get("X-Tenant"))
+	}
+}
+
+// protectAPI is the same idea for Basic-Auth endpoints.
+func (s *Server) protectAPI(h auth.HandlerFunc) http.HandlerFunc {
+	if s.auth != nil {
+		return s.auth.ProtectAPI(h)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		h(w, r, nil, r.Header.Get("X-Tenant"))
+	}
 }
 
 func (s *Server) Handler() http.Handler { return s.mux }

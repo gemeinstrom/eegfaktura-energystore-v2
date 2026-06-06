@@ -65,6 +65,10 @@ func New(ctx context.Context, dsn string, minConns, maxConns int32, appName stri
 // FromPool builds a Store around an existing PgxPool. Test helper.
 func FromPool(p PgxPool) *Store { return &Store{pool: p} }
 
+// RawPool exposes the underlying PgxPool so sibling packages
+// (counterpoint, queryengine, calc) can share the same pool.
+func RawPool(s *Store) PgxPool { return s.pool }
+
 // Close releases the connection pool.
 func (s *Store) Close() {
 	s.pool.Close()
