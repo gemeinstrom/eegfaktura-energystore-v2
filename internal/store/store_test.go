@@ -64,6 +64,37 @@ func TestQueryRangeFromAfterTo(t *testing.T) {
 	}
 }
 
+func TestLastRecordDateEmpty(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+	mock.ExpectQuery(`SELECT MAX\(ts\)`).
+		WithArgs("vfeeg", "TE100200", "AT00100", "G.01").
+		WillReturnRows(mock.NewRows([]string{"max"}).AddRow(nil))
+	_, ok, err := s.LastRecordDate(context.Background(), "vfeeg", "TE100200", "AT00100", "G.01")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false on empty result")
+	}
+}
+
+func TestLastRecordDateFound(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+	ts := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(`SELECT MAX\(ts\)`).
+		WithArgs("vfeeg", "TE100200", "AT00100", "G.01").
+		WillReturnRows(mock.NewRows([]string{"max"}).AddRow(&ts))
+	got, ok, err := s.LastRecordDate(context.Background(), "vfeeg", "TE100200", "AT00100", "G.01")
+	if err != nil || !ok {
+		t.Fatalf("err=%v ok=%v", err, ok)
+	}
+	if !got.Equal(ts) {
+		t.Fatalf("ts mismatch: %v vs %v", got, ts)
+	}
+}
+
 func TestQueryRangeOK(t *testing.T) {
 	s, mock := newMockStore(t)
 	defer mock.Close()

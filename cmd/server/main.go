@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/api"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/config"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/decode"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/migrate"
 	mqttsub "github.com/gemeinstrom/eegfaktura-energystore-v2/internal/mqtt"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
@@ -79,10 +81,21 @@ func runServe() error {
 	}
 	defer st.Close()
 
-	handler := func(_ context.Context, topic string, payload []byte) error {
-		// TODO: decode MqttEnergyMessage and call st.UpsertSlots.
-		_ = topic
-		_ = payload
+	handler := func(hctx context.Context, topic string, payload []byte) error {
+		tenant := tenantFromTopic(topic)
+		if tenant == "" {
+			return fmt.Errorf("ingest: cannot extract tenant from topic %q", topic)
+		}
+		slots, err := decode.DecodeSlots(tenant, payload)
+		if err != nil {
+			return fmt.Errorf("ingest: decode: %w", err)
+		}
+		if len(slots) == 0 {
+			return nil
+		}
+		if err := st.UpsertSlots(hctx, slots); err != nil {
+			return fmt.Errorf("ingest: upsert: %w", err)
+		}
 		return nil
 	}
 
@@ -129,4 +142,15 @@ func runServe() error {
 	}
 	log.Print("energystore-v2: shutdown complete")
 	return nil
+}
+
+// tenantFromTopic extracts the tenant from a broker topic of the form
+// `eegfaktura/<tenant>/energy/<...>`. Returns "" if the topic doesn't
+// match the expected shape.
+func tenantFromTopic(topic string) string {
+	parts := strings.Split(topic, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
 }

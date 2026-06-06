@@ -29,6 +29,7 @@ type Slot struct {
 type PgxPool interface {
 	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -152,4 +153,26 @@ func (s *Store) QueryRange(ctx context.Context, tenant, ec, mp, code string, fro
 		return nil, fmt.Errorf("store: rows: %w", err)
 	}
 	return out, nil
+}
+
+const lastRecordDateSQL = `
+SELECT MAX(ts)
+FROM energy_data
+WHERE tenant_id = $1
+  AND ec_id = $2
+  AND metering_point = $3
+  AND meter_code = $4`
+
+// LastRecordDate returns the most recent slot timestamp for the given
+// tenant/ec/mp/code, or ok=false when no rows exist.
+func (s *Store) LastRecordDate(ctx context.Context, tenant, ec, mp, code string) (time.Time, bool, error) {
+	row := s.pool.QueryRow(ctx, lastRecordDateSQL, tenant, ec, mp, code)
+	var ts *time.Time
+	if err := row.Scan(&ts); err != nil {
+		return time.Time{}, false, fmt.Errorf("store: last record date: %w", err)
+	}
+	if ts == nil {
+		return time.Time{}, false, nil
+	}
+	return *ts, true, nil
 }
