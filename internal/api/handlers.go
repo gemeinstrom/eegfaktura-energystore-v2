@@ -23,6 +23,7 @@ import (
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/calc"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/excelexport"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/graphqlapi"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/queryengine"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
@@ -42,6 +43,7 @@ type Options struct {
 	QueryEngine *queryengine.Engine
 	Calc        *calc.Engine
 	Excel       *excelexport.Engine
+	GraphQL     *graphqlapi.Engine
 }
 
 type Server struct {
@@ -54,6 +56,7 @@ type Server struct {
 	qe      *queryengine.Engine
 	calc    *calc.Engine
 	excel   *excelexport.Engine
+	graphql *graphqlapi.Engine
 }
 
 // New keeps the bare-minimum constructor for tests that don't need
@@ -78,6 +81,7 @@ func NewWithOptions(s *store.Store, opts Options) *Server {
 		qe:      opts.QueryEngine,
 		calc:    opts.Calc,
 		excel:   opts.Excel,
+		graphql: opts.GraphQL,
 	}
 	srv.routes()
 	return srv
@@ -90,6 +94,19 @@ func (s *Server) routes() {
 	s.handle("GET /api/v1/energy/{tenant}/{ec}/last-record-date", s.handleLastRecordDate)
 	if s.metrics != nil {
 		s.mux.Handle("GET /metrics", s.metrics.Handler())
+	}
+	if s.graphql != nil {
+		// /query is the v1 GraphQL endpoint. We protect it with the
+		// same auth middleware as the REST surface (workstream G); for
+		// dev/tests, the no-auth fallback returns "" tenant from
+		// X-Tenant header.
+		gqlGuard := s.auth
+		_ = gqlGuard
+		if s.auth != nil {
+			s.mux.Handle("POST /query", s.auth.GQL(s.graphql))
+		} else {
+			s.mux.Handle("POST /query", s.graphql)
+		}
 	}
 	s.eegRoutes()
 }
