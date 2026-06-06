@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,6 +31,7 @@ type PgxPool interface {
 	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Ping(ctx context.Context) error
 	Close()
 }
@@ -175,4 +177,17 @@ func (s *Store) LastRecordDate(ctx context.Context, tenant, ec, mp, code string)
 		return time.Time{}, false, nil
 	}
 	return *ts, true, nil
+}
+
+const writeDLQSQL = `
+INSERT INTO mqtt_dlq (topic, failure, error, payload)
+VALUES ($1, $2, $3, $4)`
+
+// WriteDLQ records a failed MQTT message for later replay.
+// failure should be "decode" or "upsert".
+func (s *Store) WriteDLQ(ctx context.Context, topic, failure, errMsg string, payload []byte) error {
+	if _, err := s.pool.Exec(ctx, writeDLQSQL, topic, failure, errMsg, payload); err != nil {
+		return fmt.Errorf("store: write DLQ: %w", err)
+	}
+	return nil
 }

@@ -29,6 +29,21 @@ func TestUpsertSlotsEmpty(t *testing.T) {
 	}
 }
 
+func TestWriteDLQ(t *testing.T) {
+	s, mock := newMockStore(t)
+	defer mock.Close()
+	mock.ExpectExec(`INSERT INTO mqtt_dlq`).
+		WithArgs("eegfaktura/vfeeg/energy/TE100200", "decode", "bad json", []byte("{garbage")).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	if err := s.WriteDLQ(context.Background(),
+		"eegfaktura/vfeeg/energy/TE100200", "decode", "bad json", []byte("{garbage")); err != nil {
+		t.Fatalf("dlq: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestUpsertSlotsBatchSent(t *testing.T) {
 	s, mock := newMockStore(t)
 	defer mock.Close()

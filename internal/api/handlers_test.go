@@ -10,8 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
 )
+
+type fakeHealth struct{ up bool }
+
+func (f *fakeHealth) Connected() bool { return f.up }
 
 func newServer(t *testing.T) (*Server, pgxmock.PgxPoolIface) {
 	t.Helper()
@@ -53,6 +58,66 @@ func TestReadyzDBDown(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestReadyzMQTTDisconnected(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock: %v", err)
+	}
+	defer mock.Close()
+	mock.ExpectPing()
+	srv := NewWithOptions(store.FromPool(mock), Options{MQTT: &fakeHealth{up: false}})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), "mqtt-disconnected") {
+		t.Fatalf("expected mqtt-disconnected, got %s", rec.Body.String())
+	}
+}
+
+func TestReadyzMQTTConnected(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock: %v", err)
+	}
+	defer mock.Close()
+	mock.ExpectPing()
+	srv := NewWithOptions(store.FromPool(mock), Options{MQTT: &fakeHealth{up: true}})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock: %v", err)
+	}
+	defer mock.Close()
+	mtr := metrics.New()
+	// Touch a labelled CounterVec so the series is exported.
+	mtr.MQTTMessagesTotal.WithLabelValues("ok").Inc()
+	srv := NewWithOptions(store.FromPool(mock), Options{Metrics: mtr})
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !contains(body, "esv2_mqtt_messages_total") {
+		t.Fatalf("expected metric esv2_mqtt_messages_total in output, got: %s", body)
+	}
+	if !contains(body, "esv2_mqtt_connected") {
+		t.Fatalf("expected metric esv2_mqtt_connected in output")
 	}
 }
 

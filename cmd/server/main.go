@@ -13,7 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,17 +21,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rs/cors"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/api"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/config"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/decode"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/logging"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/migrate"
 	mqttsub "github.com/gemeinstrom/eegfaktura-energystore-v2/internal/mqtt"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
 )
 
 func main() {
+	logger := logging.Setup()
+
 	cmd := "serve"
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
@@ -39,34 +44,37 @@ func main() {
 
 	switch cmd {
 	case "serve":
-		if err := runServe(); err != nil {
-			log.Fatalf("energystore-v2 serve: %v", err)
+		if err := runServe(logger); err != nil {
+			logger.Error("serve exited with error", "err", err)
+			os.Exit(1)
 		}
 	case "migrate":
-		if err := runMigrate(); err != nil {
-			log.Fatalf("energystore-v2 migrate: %v", err)
+		if err := runMigrate(logger); err != nil {
+			logger.Error("migrate exited with error", "err", err)
+			os.Exit(1)
 		}
 	default:
-		log.Fatalf("energystore-v2: unknown subcommand %q (expected: serve, migrate)", cmd)
+		logger.Error("unknown subcommand", "cmd", cmd)
+		os.Exit(2)
 	}
 }
 
-func runMigrate() error {
+func runMigrate(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	log.Print("migrate: applying embedded migrations")
+	logger.Info("migrate: applying embedded migrations")
 	if err := migrate.Run(ctx, cfg.DB.DSN); err != nil {
 		return err
 	}
-	log.Print("migrate: complete")
+	logger.Info("migrate: complete")
 	return nil
 }
 
-func runServe() error {
+func runServe(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -81,41 +89,90 @@ func runServe() error {
 	}
 	defer st.Close()
 
+	mtr := metrics.New()
+	mtr.MQTTConnected.Set(0)
+
 	handler := func(hctx context.Context, topic string, payload []byte) error {
+		start := time.Now()
+		defer func() {
+			mtr.MQTTUpsertDuration.Observe(time.Since(start).Seconds())
+		}()
+
 		tenant := tenantFromTopic(topic)
 		if tenant == "" {
-			return fmt.Errorf("ingest: cannot extract tenant from topic %q", topic)
+			err := fmt.Errorf("cannot extract tenant from topic %q", topic)
+			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues("decode_error").Inc()
+			mtr.MQTTDecodeErrors.Inc()
+			return err
 		}
+
 		slots, err := decode.DecodeSlots(tenant, payload)
 		if err != nil {
-			return fmt.Errorf("ingest: decode: %w", err)
+			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues("decode_error").Inc()
+			mtr.MQTTDecodeErrors.Inc()
+			return fmt.Errorf("decode: %w", err)
 		}
+
+		mtr.MQTTUpsertBatchSize.Observe(float64(len(slots)))
+
 		if len(slots) == 0 {
+			mtr.MQTTMessagesTotal.WithLabelValues("ok").Inc()
 			return nil
 		}
 		if err := st.UpsertSlots(hctx, slots); err != nil {
-			return fmt.Errorf("ingest: upsert: %w", err)
+			writeDLQ(hctx, st, mtr, logger, topic, "upsert", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues("upsert_error").Inc()
+			mtr.MQTTUpsertErrors.Inc()
+			return fmt.Errorf("upsert: %w", err)
 		}
+		mtr.MQTTMessagesTotal.WithLabelValues("ok").Inc()
 		return nil
 	}
 
 	hostname, _ := os.Hostname()
-	sub, err := mqttsub.New(cfg.MQTT, handler, hostname)
+	sub, err := mqttsub.NewWithOptions(cfg.MQTT, handler, hostname, mqttsub.Options{
+		Logger: logger,
+		OnConnectionChange: func(connected bool) {
+			if connected {
+				mtr.MQTTConnected.Set(1)
+			} else {
+				mtr.MQTTConnected.Set(0)
+			}
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("mqtt: %w", err)
 	}
 
-	apiSrv := api.New(st)
+	apiSrv := api.NewWithOptions(st, api.Options{
+		Logger:  logger,
+		Metrics: mtr,
+		MQTT:    sub,
+	})
+
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins: corsOriginsFromEnv(),
+		AllowedMethods: []string{"GET", "HEAD", "POST", "PUT", "OPTIONS", "DELETE"},
+		AllowedHeaders: []string{
+			"Accept", "Accept-Encoding", "Accept-Language",
+			"Authorization", "Content-Type", "Content-Length",
+			"Origin", "User-Agent", "X-Requested-With", "X-Tenant",
+		},
+		AllowCredentials: true,
+	}).Handler(apiSrv.Handler())
+
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTP.ListenAddr,
-		Handler:           apiSrv.Handler(),
+		Handler:           corsHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		log.Printf("http: listening on %s", cfg.HTTP.ListenAddr)
+		logger.Info("http: listening", "addr", cfg.HTTP.ListenAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http: %w", err)
 		}
@@ -123,7 +180,7 @@ func runServe() error {
 	})
 
 	g.Go(func() error {
-		log.Printf("mqtt: starting subscriber")
+		logger.Info("mqtt: starting subscriber")
 		if err := sub.Start(gctx); err != nil && !errors.Is(err, context.Canceled) {
 			return fmt.Errorf("mqtt: %w", err)
 		}
@@ -140,8 +197,20 @@ func runServe() error {
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-	log.Print("energystore-v2: shutdown complete")
+	logger.Info("shutdown complete")
 	return nil
+}
+
+// writeDLQ logs + writes the failed payload, swallowing DLQ-write errors
+// (DLQ failure must not block ack of the original message — paho would
+// just redeliver and we'd hot-loop).
+func writeDLQ(ctx context.Context, st *store.Store, mtr *metrics.Metrics, logger *slog.Logger,
+	topic, failure, errMsg string, payload []byte) {
+	if err := st.WriteDLQ(ctx, topic, failure, errMsg, payload); err != nil {
+		logger.Error("dlq write failed", "err", err, "topic", topic, "failure", failure)
+		return
+	}
+	mtr.MQTTDLQWrites.Inc()
 }
 
 // tenantFromTopic extracts the tenant from a broker topic of the form
@@ -153,4 +222,25 @@ func tenantFromTopic(topic string) string {
 		return ""
 	}
 	return parts[1]
+}
+
+// corsOriginsFromEnv returns the comma-split ESV2_CORS_ALLOWED_ORIGINS,
+// defaulting to ["*"] when unset. v1 used "*" via gorilla/handlers; same
+// default here.
+func corsOriginsFromEnv() []string {
+	raw := os.Getenv("ESV2_CORS_ALLOWED_ORIGINS")
+	if raw == "" {
+		return []string{"*"}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"*"}
+	}
+	return out
 }
