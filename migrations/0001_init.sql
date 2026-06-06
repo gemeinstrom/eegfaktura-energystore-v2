@@ -6,8 +6,10 @@
 -- UPSERT pro geliefertem Slot.
 --
 -- Voraussetzung: TimescaleDB-Extension in der Postgres-Instanz installiert.
-
-BEGIN;
+--
+-- Convention: kein outer BEGIN/COMMIT. Der Migrations-Runner serialisiert
+-- via pg_advisory_lock; `CREATE MATERIALIZED VIEW WITH (timescaledb.continuous)`
+-- kann ohnehin nicht in einer Transaktion laufen.
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
@@ -132,5 +134,3 @@ SELECT add_continuous_aggregate_policy(
 
 -- Monatssummen werden aus energy_daily aggregiert (kein CA noetig:
 -- Lese-Anfrage liest 28-31 daily-Rows pro Metering-Point + Code).
-
-COMMIT;

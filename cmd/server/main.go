@@ -1,6 +1,12 @@
 // Command energystore-v2 is the stateless time-series ingest+API service
 // for the eegfaktura platform. See ../../README.md for the architectural
 // rationale.
+//
+// Subcommands:
+//
+//	energystore-v2          → runs the serve loop (default)
+//	energystore-v2 serve    → same as default
+//	energystore-v2 migrate  → applies embedded SQL migrations and exits
 package main
 
 import (
@@ -18,17 +24,47 @@ import (
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/api"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/config"
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/migrate"
 	mqttsub "github.com/gemeinstrom/eegfaktura-energystore-v2/internal/mqtt"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("energystore-v2: %v", err)
+	cmd := "serve"
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
+	}
+
+	switch cmd {
+	case "serve":
+		if err := runServe(); err != nil {
+			log.Fatalf("energystore-v2 serve: %v", err)
+		}
+	case "migrate":
+		if err := runMigrate(); err != nil {
+			log.Fatalf("energystore-v2 migrate: %v", err)
+		}
+	default:
+		log.Fatalf("energystore-v2: unknown subcommand %q (expected: serve, migrate)", cmd)
 	}
 }
 
-func run() error {
+func runMigrate() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	log.Print("migrate: applying embedded migrations")
+	if err := migrate.Run(ctx, cfg.DB.DSN); err != nil {
+		return err
+	}
+	log.Print("migrate: complete")
+	return nil
+}
+
+func runServe() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -43,7 +79,6 @@ func run() error {
 	}
 	defer st.Close()
 
-	// MQTT handler: decode payload, transform into Slot batch, UPSERT.
 	handler := func(_ context.Context, topic string, payload []byte) error {
 		// TODO: decode MqttEnergyMessage and call st.UpsertSlots.
 		_ = topic

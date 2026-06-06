@@ -4,27 +4,38 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Slot is a single quarter-hour measurement of one metering point + OBIS code.
 // Corresponds to one row in the energy_data hypertable.
 type Slot struct {
-	TenantID       string
-	ECID           string
-	MeteringPoint  string
-	MeterCode      string
-	Timestamp      time.Time
-	Value          float64
-	QoV            int16
+	TenantID      string
+	ECID          string
+	MeteringPoint string
+	MeterCode     string
+	Timestamp     time.Time
+	Value         float64
+	QoV           int16
+}
+
+// PgxPool is the subset of *pgxpool.Pool used by Store. Defined so tests can
+// substitute pgxmock.PgxPoolIface.
+type PgxPool interface {
+	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Ping(ctx context.Context) error
+	Close()
 }
 
 // Store wraps the pgxpool for TimescaleDB access.
 type Store struct {
-	pool *pgxpool.Pool
+	pool PgxPool
 }
 
 // New constructs a Store from a DSN. Callers must Close it.
@@ -48,25 +59,97 @@ func New(ctx context.Context, dsn string, minConns, maxConns int32, appName stri
 	return &Store{pool: pool}, nil
 }
 
+// FromPool builds a Store around an existing PgxPool. Test helper.
+func FromPool(p PgxPool) *Store { return &Store{pool: p} }
+
 // Close releases the connection pool.
 func (s *Store) Close() {
 	s.pool.Close()
 }
 
+// Ping checks the connection.
+func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+const upsertSlotSQL = `
+INSERT INTO energy_data
+    (tenant_id, ec_id, metering_point, meter_code, ts, value, qov)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (tenant_id, ec_id, metering_point, meter_code, ts)
+DO UPDATE SET value = EXCLUDED.value, qov = EXCLUDED.qov`
+
 // UpsertSlots writes a batch of slots with INSERT ... ON CONFLICT DO UPDATE.
-// This is the core hot path that replaces v1's Full-Range Read-Modify-Write.
+// This is the core hot path that replaces v1's Full-Range Read-Modify-Write:
+// only the cells that the broker actually delivered are touched.
 //
-// TODO: implement via pgx.Batch or COPY-with-conflict pattern depending on
-// benchmark results. Skeleton signature for now.
+// All slots in one call are sent as a single pgx.Batch (= one round-trip,
+// pipelined). For batches larger than batchChunkSize, the slice is split.
 func (s *Store) UpsertSlots(ctx context.Context, slots []Slot) error {
+	const batchChunkSize = 1000
 	if len(slots) == 0 {
 		return nil
 	}
-	return fmt.Errorf("store: UpsertSlots not yet implemented")
+	for offset := 0; offset < len(slots); offset += batchChunkSize {
+		end := offset + batchChunkSize
+		if end > len(slots) {
+			end = len(slots)
+		}
+		if err := s.upsertChunk(ctx, slots[offset:end]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
+func (s *Store) upsertChunk(ctx context.Context, slots []Slot) error {
+	batch := &pgx.Batch{}
+	for i := range slots {
+		sl := &slots[i]
+		batch.Queue(upsertSlotSQL,
+			sl.TenantID, sl.ECID, sl.MeteringPoint, sl.MeterCode,
+			sl.Timestamp, sl.Value, sl.QoV)
+	}
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < len(slots); i++ {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("store: upsert slot %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+const queryRangeSQL = `
+SELECT tenant_id, ec_id, metering_point, meter_code, ts, value, qov
+FROM energy_data
+WHERE tenant_id = $1
+  AND ec_id = $2
+  AND metering_point = $3
+  AND meter_code = $4
+  AND ts >= $5
+  AND ts <= $6
+ORDER BY ts ASC`
+
 // QueryRange returns slots in [from, to] for the given tenant/ec/mp/code.
-// TODO: implement.
 func (s *Store) QueryRange(ctx context.Context, tenant, ec, mp, code string, from, to time.Time) ([]Slot, error) {
-	return nil, fmt.Errorf("store: QueryRange not yet implemented")
+	if from.After(to) {
+		return nil, errors.New("store: QueryRange: from after to")
+	}
+	rows, err := s.pool.Query(ctx, queryRangeSQL, tenant, ec, mp, code, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("store: query range: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Slot, 0, 96)
+	for rows.Next() {
+		var sl Slot
+		if err := rows.Scan(&sl.TenantID, &sl.ECID, &sl.MeteringPoint, &sl.MeterCode,
+			&sl.Timestamp, &sl.Value, &sl.QoV); err != nil {
+			return nil, fmt.Errorf("store: scan: %w", err)
+		}
+		out = append(out, sl)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: rows: %w", err)
+	}
+	return out, nil
 }
