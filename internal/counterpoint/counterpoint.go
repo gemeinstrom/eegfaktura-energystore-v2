@@ -83,7 +83,14 @@ const metaTimeLayout = "02.01.2006 15:04:05"
 
 // MarshalJSON emits the v1-compat wire shape used by report.meta:
 //
-//	"name":          string
+//	"name":          string  — v1 stored the metering-point ID here
+//	                          (NOT a human name); customer-web's
+//	                          metaAdapter is keyed by name and
+//	                          downstream filters look it up via
+//	                          meta[meterId]. So we MUST emit
+//	                          c.MeteringPoint, not c.Name.
+//	"displayName":   string  — v2-addition, carries the cp_meta.payload
+//	                          human-readable name if present.
 //	"sourceIdx":     int
 //	"dir":           "CONSUMPTION" | "GENERATION"
 //	"period_start":  "DD.MM.YYYY HH:mm:ss"
@@ -98,6 +105,7 @@ func (c *CounterPoint) MarshalJSON() ([]byte, error) {
 	out := struct {
 		ID            string `json:"id,omitempty"`
 		Name          string `json:"name"`
+		DisplayName   string `json:"displayName,omitempty"`
 		SourceIdx     int    `json:"sourceIdx"`
 		Dir           string `json:"dir"`
 		Count         uint16 `json:"count"`
@@ -108,7 +116,8 @@ func (c *CounterPoint) MarshalJSON() ([]byte, error) {
 		MeteringPoint string `json:"meteringPoint,omitempty"`
 		UpdatedAt     string `json:"updatedAt,omitempty"`
 	}{
-		Name:          c.Name,
+		Name:          c.MeteringPoint,
+		DisplayName:   c.Name,
 		SourceIdx:     c.SourceIdx,
 		Dir:           c.Direction.String(),
 		TenantID:      c.TenantID,

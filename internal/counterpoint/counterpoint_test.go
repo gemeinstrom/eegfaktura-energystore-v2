@@ -41,7 +41,11 @@ func TestMarshalJSON_V1WireCompat(t *testing.T) {
 		{"period_start", "01.01.2026 00:00:00"},
 		{"period_end", "01.01.2030 00:00:00"},
 		{"dir", "CONSUMPTION"},
-		{"name", "Anna Berger"},
+		// v1-semantic: "name" is the metering point identifier, not a
+		// human label. The customer-web SPA's metaAdapter keys on this
+		// and downstream filters do meta[meterId] lookups.
+		{"name", "AT0010000000000000000010000000001"},
+		{"displayName", "Anna Berger"},
 		{"id", "cpmeta/2026"},
 	} {
 		if v, _ := got[want.key].(string); v != want.value {
