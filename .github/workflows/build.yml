@@ -1,0 +1,60 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout
+        uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29  # v4.1.6
+
+      - name: set up go
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7  # v5.0.1
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test -race ./...
+
+      - name: compute image tag
+        id: tag
+        env:
+          IMAGE: ghcr.io/gemeinstrom/eegfaktura-energystore-v2
+        run: echo "tag=src-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: set up docker buildx
+        uses: docker/setup-buildx-action@d70bba72b1f3fd22344832f00baa16ece964efeb  # v3.3.0
+
+      - name: log in to ghcr
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@0d4c9c5ea7693da7b068278f7b52bda2a190a446  # v3.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@1556b056b6b07810a5d3a39a6e89d1d7c4eafe87  # v7.0.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/gemeinstrom/eegfaktura-energystore-v2:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

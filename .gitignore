@@ -1,0 +1,15 @@
+/bin/
+/out/
+*.test
+*.out
+.env
+.env.*
+!.env.example
+coverage.txt
+dist/
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
