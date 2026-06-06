@@ -196,7 +196,14 @@ func slotsForRow(cp *cpRecord, ts time.Time, cols []string, tenant, ec string) [
 			MeterCode:     code,
 			Timestamp:     ts,
 			Value:         v,
-			QoV:           0,
+			// XLSX-Import is the user-driven backfill path; the spreadsheet
+			// carries already-measured values (Netzbetreiber-Lastgang or
+			// the result of an earlier Excel-Export round-trip), so we
+			// mark them measured. qov=0 was the previous default and
+			// made the re-export sheet render empty (Excel-renderer
+			// sheet_helpers.go:setCell treats 0 as "no value"). See
+			// feedback_excel_qov_zero_blank_cells.md.
+			QoV: 1,
 		})
 	}
 	switch cp.direction {

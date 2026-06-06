@@ -93,23 +93,23 @@ func TestImporter_ParsesAndUpserts(t *testing.T) {
 	batch := mock.ExpectBatch()
 	batch.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "TE100200", "AT00100000000000000000000001CONS", "1-1:1.9.0 G.01",
-			pgxmock.AnyArg(), float64(2.0), int16(0)).
+			pgxmock.AnyArg(), float64(2.0), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 	batch.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "TE100200", "AT00100000000000000000000001CONS", "1-1:2.9.0 G.02",
-			pgxmock.AnyArg(), float64(0.5), int16(0)).
+			pgxmock.AnyArg(), float64(0.5), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 	batch.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "TE100200", "AT00100000000000000000000001CONS", "1-1:2.9.0 G.03",
-			pgxmock.AnyArg(), float64(0.3), int16(0)).
+			pgxmock.AnyArg(), float64(0.3), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 	batch.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "TE100200", "AT00100000000000000000000001PROD", "1-1:2.9.0 G.01",
-			pgxmock.AnyArg(), float64(3.0), int16(0)).
+			pgxmock.AnyArg(), float64(3.0), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 	batch.ExpectExec(`INSERT INTO energy_data`).
 		WithArgs("vfeeg", "TE100200", "AT00100000000000000000000001PROD", "1-1:2.9.0 P.01",
-			pgxmock.AnyArg(), float64(2.7), int16(0)).
+			pgxmock.AnyArg(), float64(2.7), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 
 	im := &Importer{

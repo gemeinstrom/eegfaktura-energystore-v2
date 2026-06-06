@@ -49,11 +49,11 @@ func TestDecodeSlots_v1FixtureRoundTrip(t *testing.T) {
 	if slots[0].MeterCode != "1-1:1.9.0 G.01" {
 		t.Fatalf("expected raw OBIS pass-through, got %q", slots[0].MeterCode)
 	}
-	if slots[0].QoV != 0 {
-		t.Fatalf("L1 → qov 0, got %d", slots[0].QoV)
+	if slots[0].QoV != 1 {
+		t.Fatalf("L1 → qov 1 (measured), got %d", slots[0].QoV)
 	}
-	if slots[1].QoV != 1 {
-		t.Fatalf("L2 → qov 1, got %d", slots[1].QoV)
+	if slots[1].QoV != 2 {
+		t.Fatalf("L2 → qov 2 (replaced), got %d", slots[1].QoV)
 	}
 	if slots[1].Value != 0.130 {
 		t.Fatalf("value: %v", slots[1].Value)
@@ -82,8 +82,12 @@ func TestDecodeSlots_MissingMeterCode(t *testing.T) {
 	}
 }
 
+// TestQoVForMethod pins the v1-parity mapping (L1=1 measured, L2=2
+// replaced, L3=3 estimated, unknown=0). Earlier v2 versions had the
+// mapping shifted by one (L1=0) which made every measured MQTT slot
+// land in the DB with qov=0 → empty Excel cells downstream.
 func TestQoVForMethod(t *testing.T) {
-	cases := map[string]int16{"L1": 0, "L2": 1, "L3": 2, "": 9, "weird": 9}
+	cases := map[string]int16{"L1": 1, "L2": 2, "L3": 3, "": 0, "weird": 0}
 	for in, want := range cases {
 		if got := QoVForMethod(in); got != want {
 			t.Errorf("QoVForMethod(%q) = %d, want %d", in, got, want)
