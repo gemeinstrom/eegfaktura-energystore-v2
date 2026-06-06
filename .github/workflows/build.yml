@@ -50,7 +50,7 @@ jobs:
 
       - name: build and push
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@1556b056b6b07810a5d3a39a6e89d1d7c4eafe87  # v7.0.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83  # v6.18.0
         with:
           context: .
           platforms: linux/amd64
