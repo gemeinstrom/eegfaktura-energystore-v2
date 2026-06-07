@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -57,6 +58,25 @@ type MQTTConfig struct {
 	// Disabled (empty TopicPattern) by default; mirrors v1's separate
 	// `mqtt.inverterSubscriptionTopic`.
 	Inverter MQTTInverterConfig
+
+	// Decrypt configures the optional pre-decode step for prod-stack
+	// compatibility. The v1-prod xp-adapter wraps CR_MSG-Payloads in
+	// AES-256-CBC + gzip + base64 (RE'd 2026-06-07, full analysis in
+	// gemeinstrom/eegfaktura-platform#169). v2 needs to reproduce
+	// this when replacing v1 in production.
+	//
+	// Pilot default: empty key → pass-through (no decryption).
+	// Prod cutover: set ESV2_MQTT_DECRYPT_KEY_HEX + ESV2_MQTT_DECRYPT_IV_HEX
+	// + ESV2_MQTT_DECRYPT_GZIP=true to enable.
+	Decrypt MQTTDecryptConfig
+}
+
+// MQTTDecryptConfig matches decode.DecryptConfig but stays here so the
+// config package owns the env-binding + hex-parsing concern.
+type MQTTDecryptConfig struct {
+	Key  []byte
+	IV   []byte
+	Gzip bool
 }
 
 type MQTTInverterConfig struct {
@@ -99,6 +119,9 @@ func Load() (*Config, error) {
 		"mqtt.broker_url",
 		"mqtt.topic_pattern",
 		"mqtt.inverter.topic_pattern",
+		"mqtt.decrypt.key_hex",
+		"mqtt.decrypt.iv_hex",
+		"mqtt.decrypt.gzip",
 		"auth.app_issuer", "auth.app_client_id",
 		"auth.api_issuer", "auth.api_client_id", "auth.api_client_secret",
 	} {
@@ -134,6 +157,10 @@ func Load() (*Config, error) {
 				TopicPattern: viper.GetString("mqtt.inverter.topic_pattern"),
 				ShareGroup:   viper.GetString("mqtt.inverter.share_group"),
 			},
+			Decrypt: MQTTDecryptConfig{
+				Gzip: viper.GetBool("mqtt.decrypt.gzip"),
+				// Key + IV are filled below after hex parsing.
+			},
 		},
 		Auth: AuthConfig{
 			Enabled:         viper.GetBool("auth.enabled"),
@@ -154,5 +181,43 @@ func Load() (*Config, error) {
 	if cfg.Auth.Enabled && (cfg.Auth.AppIssuer == "" || cfg.Auth.AppClientID == "") {
 		return nil, fmt.Errorf("config: auth.enabled requires auth.app_issuer + auth.app_client_id")
 	}
+
+	// Decode the MQTT-decrypt hex key + IV if present. Both must either
+	// be empty (pilot/dev pass-through) or both must decode to valid
+	// AES-256 sizes. Leaving one set and the other empty is a config
+	// error — likely a missed env-var.
+	if rawKey := strings.TrimSpace(viper.GetString("mqtt.decrypt.key_hex")); rawKey != "" {
+		key, err := parseHexBytes(rawKey)
+		if err != nil {
+			return nil, fmt.Errorf("config: mqtt.decrypt.key_hex: %w", err)
+		}
+		if l := len(key); l != 32 {
+			return nil, fmt.Errorf("config: mqtt.decrypt.key_hex must decode to 32 bytes (got %d)", l)
+		}
+		cfg.MQTT.Decrypt.Key = key
+	}
+	if rawIV := strings.TrimSpace(viper.GetString("mqtt.decrypt.iv_hex")); rawIV != "" {
+		iv, err := parseHexBytes(rawIV)
+		if err != nil {
+			return nil, fmt.Errorf("config: mqtt.decrypt.iv_hex: %w", err)
+		}
+		if l := len(iv); l != 16 {
+			return nil, fmt.Errorf("config: mqtt.decrypt.iv_hex must decode to 16 bytes (got %d)", l)
+		}
+		cfg.MQTT.Decrypt.IV = iv
+	}
+	if (len(cfg.MQTT.Decrypt.Key) == 0) != (len(cfg.MQTT.Decrypt.IV) == 0) {
+		return nil, fmt.Errorf("config: mqtt.decrypt.key_hex and mqtt.decrypt.iv_hex must both be set or both empty")
+	}
 	return cfg, nil
+}
+
+// parseHexBytes decodes a hex string with optional 0x prefix.
+func parseHexBytes(s string) ([]byte, error) {
+	s = strings.TrimPrefix(s, "0x")
+	out, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

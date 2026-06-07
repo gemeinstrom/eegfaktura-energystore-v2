@@ -112,13 +112,31 @@ func runServe(logger *slog.Logger) error {
 		return fmt.Errorf("graphql: %w", err)
 	}
 
+	// decryptCfg holds the optional pre-decode step that unwraps the
+	// prod-stack's AES-256-CBC + gzip + base64 envelope. Empty in the
+	// pilot (= pass-through). Enabled via ESV2_MQTT_DECRYPT_KEY_HEX +
+	// ESV2_MQTT_DECRYPT_IV_HEX + ESV2_MQTT_DECRYPT_GZIP=true.
+	decryptCfg := decode.DecryptConfig{
+		Key:  cfg.MQTT.Decrypt.Key,
+		IV:   cfg.MQTT.Decrypt.IV,
+		Gzip: cfg.MQTT.Decrypt.Gzip,
+	}
+	if decryptCfg.Enabled() {
+		logger.Info("mqtt: payload decrypt enabled",
+			"key_bytes", len(decryptCfg.Key),
+			"iv_bytes", len(decryptCfg.IV),
+			"gzip", decryptCfg.Gzip)
+	}
+
 	// energyHandler ingests EDA energy-data messages: tenant from topic,
 	// ecId from payload.
-	energyHandler := makeIngestHandler(st, mtr, logger, "energy", "")
+	energyHandler := makeIngestHandler(st, mtr, logger, "energy", "", decryptCfg)
 	// inverterHandler ingests PV-inverter messages: tenant from topic,
 	// ecId hard-coded to "inverter" (mirrors v1 importEnergyV2 call
-	// site).
-	inverterHandler := makeIngestHandler(st, mtr, logger, "inverter", "inverter")
+	// site). Inverter messages are not encrypted in the prod stack
+	// (the encrypt-only-CR_MSG check), so pass an empty config to
+	// short-circuit the decode pre-step.
+	inverterHandler := makeIngestHandler(st, mtr, logger, "inverter", "inverter", decode.DecryptConfig{})
 
 	hostname, _ := os.Hostname()
 	energySub, err := mqttsub.NewWithOptions(cfg.MQTT, energyHandler, hostname+"-energy", mqttsub.Options{
@@ -229,7 +247,7 @@ func runServe(logger *slog.Logger) error {
 // applied to every slot after decode so the row lands in a deterministic
 // (tenant, "inverter") namespace.
 func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logger,
-	source, ecidOverride string) mqttsub.Handler {
+	source, ecidOverride string, decryptCfg decode.DecryptConfig) mqttsub.Handler {
 	return func(hctx context.Context, topic string, payload []byte) error {
 		start := time.Now()
 		defer func() {
@@ -245,7 +263,18 @@ func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logge
 			return err
 		}
 
-		slots, err := decode.DecodeSlots(tenant, payload)
+		// Optional decrypt: pass-through when DecryptConfig is empty
+		// (pilot default). Prod-cutover sets ESV2_MQTT_DECRYPT_KEY_HEX
+		// etc. to enable AES-256-CBC + gzip + base64 unwrap.
+		raw, err := decryptCfg.Decrypt(payload)
+		if err != nil {
+			writeDLQ(hctx, st, mtr, logger, topic, "decrypt", err.Error(), payload)
+			mtr.MQTTMessagesTotal.WithLabelValues(source, "decrypt_error").Inc()
+			mtr.MQTTDecodeErrors.Inc()
+			return fmt.Errorf("decrypt: %w", err)
+		}
+
+		slots, err := decode.DecodeSlots(tenant, raw)
 		if err != nil {
 			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
 			mtr.MQTTMessagesTotal.WithLabelValues(source, "decode_error").Inc()
