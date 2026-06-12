@@ -317,27 +317,38 @@ func writeDLQ(ctx context.Context, st *store.Store, mtr *metrics.Metrics, logger
 	mtr.MQTTDLQWrites.Inc()
 }
 
-// buildAuth constructs the auth middleware bundle. When auth is disabled
-// it returns nil — the REST endpoints will run unauthenticated (dev
-// convenience). When enabled, the App issuer is mandatory; the API
-// issuer is optional (some clusters don't expose ProtectAPI).
+// buildAuth constructs the auth middleware bundle. Auth is on by default
+// (fail-closed, see config.Load); the only way to run without it is the
+// explicit dev override ESV2_DEV_NO_AUTH=true, which returns nil — the
+// REST endpoints will then run unauthenticated. When enabled, the App
+// issuer is mandatory (config.Load already rejects missing values); the
+// API issuer is optional (some clusters don't expose ProtectAPI).
 func buildAuth(ctx context.Context, cfg config.AuthConfig, logger *slog.Logger) (*auth.Middleware, error) {
 	if !cfg.Enabled {
-		logger.Warn("auth disabled (ESV2_AUTH_ENABLED=false) — endpoints will be unprotected")
+		if !cfg.DevNoAuth {
+			// Defensive: config.Load only clears Enabled via DevNoAuth,
+			// but fail closed if that invariant ever breaks.
+			return nil, fmt.Errorf("auth disabled without ESV2_DEV_NO_AUTH=true")
+		}
+		logger.Warn("auth DISABLED via ESV2_DEV_NO_AUTH=true — endpoints will be unprotected (dev only, never in production)")
 		return nil, nil
 	}
-	appKC, err := auth.NewKeycloakClient(ctx, cfg.AppIssuer, cfg.AppClientID, "", nil)
+	appKC, err := auth.NewKeycloakClient(ctx, cfg.AppIssuer, cfg.AppClientID, "", cfg.AppAudience, nil)
 	if err != nil {
 		return nil, fmt.Errorf("app KC: %w", err)
 	}
 	var apiKC *auth.KeycloakClient
 	if cfg.APIIssuer != "" && cfg.APIClientID != "" {
-		apiKC, err = auth.NewKeycloakClient(ctx, cfg.APIIssuer, cfg.APIClientID, cfg.APIClientSecret, nil)
+		apiKC, err = auth.NewKeycloakClient(ctx, cfg.APIIssuer, cfg.APIClientID, cfg.APIClientSecret, cfg.APIAudience, nil)
 		if err != nil {
 			return nil, fmt.Errorf("api KC: %w", err)
 		}
 	}
-	logger.Info("auth enabled", "app_issuer", cfg.AppIssuer, "api_issuer", cfg.APIIssuer)
+	if cfg.AppAudience == "" {
+		logger.Warn("auth: no ESV2_AUTH_APP_AUDIENCE set — JWT audience (aud) is NOT verified (v1-compat)")
+	}
+	logger.Info("auth enabled", "app_issuer", cfg.AppIssuer, "api_issuer", cfg.APIIssuer,
+		"app_audience", cfg.AppAudience, "api_audience", cfg.APIAudience)
 	return auth.FromKeycloak(appKC, apiKC, auth.Options{Logger: logger}), nil
 }
 

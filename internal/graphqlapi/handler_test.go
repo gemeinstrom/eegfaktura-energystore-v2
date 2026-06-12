@@ -12,6 +12,7 @@ import (
 
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/calc"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/counterpoint"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/queryengine"
@@ -98,6 +99,57 @@ func TestGraphQL_LastEnergyDate_WithMeta(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"lastEnergyDate"`) {
 		t.Fatalf("expected lastEnergyDate field, got %s", rec.Body.String())
+	}
+}
+
+func TestGraphQL_TenantArgMismatchRejected(t *testing.T) {
+	// A verified tenant on the context (set by auth.GQL) must win over
+	// the client-supplied tenant arg: naming a foreign tenant is an error,
+	// and no DB query may run.
+	gql, mock := newGqlEngine(t)
+	defer mock.Close()
+	q := `{"query":"{ lastEnergyDate(tenant: \"OTHER\", ecId: \"TE100200\") }"}`
+	req := httptest.NewRequest(http.MethodPost, "/query", strings.NewReader(q))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithTenant(req.Context(), "VFEEG"))
+	rec := httptest.NewRecorder()
+	gql.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (GraphQL error in payload), got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "tenant mismatch") {
+		t.Fatalf("expected tenant mismatch error, got %s", rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("no DB query expected: %v", err)
+	}
+}
+
+func TestGraphQL_VerifiedTenantOverridesArg(t *testing.T) {
+	// With a verified tenant on the context, the resolver must query with
+	// the verified value (uppercased by the middleware), not the raw arg.
+	gql, mock := newGqlEngine(t)
+	defer mock.Close()
+	mock.ExpectQuery(`FROM counterpoint_meta`).
+		WithArgs("VFEEG", "TE100200").
+		WillReturnRows(mock.NewRows([]string{
+			"tenant_id", "ec_id", "metering_point", "direction", "source_idx",
+			"period_start", "period_end", "payload", "updated_at",
+		}))
+	q := `{"query":"{ lastEnergyDate(tenant: \"vfeeg\", ecId: \"TE100200\") }"}`
+	req := httptest.NewRequest(http.MethodPost, "/query", strings.NewReader(q))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.WithTenant(req.Context(), "VFEEG"))
+	rec := httptest.NewRecorder()
+	gql.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "tenant mismatch") {
+		t.Fatalf("unexpected mismatch error: %s", rec.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 

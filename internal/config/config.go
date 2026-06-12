@@ -22,15 +22,27 @@ type AuthConfig struct {
 	AppIssuer   string
 	AppClientID string
 
+	// AppAudience / APIAudience enable the JWT `aud` check when set
+	// (ESV2_AUTH_APP_AUDIENCE / ESV2_AUTH_API_AUDIENCE). Empty keeps the
+	// v1-compat SkipClientIDCheck behaviour (realm as trust boundary).
+	AppAudience string
+	APIAudience string
+
 	// APIIssuer / APIClientID / APIClientSecret drive the password-grant
 	// bridge used by ProtectAPI (Basic-Auth).
 	APIIssuer       string
 	APIClientID     string
 	APIClientSecret string
 
-	// Enabled gates whether main wires Protect* into the API. Off by
-	// default so dev environments without Keycloak still come up.
+	// Enabled gates whether main wires Protect* into the API. ON by
+	// default (fail-closed): a forgotten env var must not leave the REST
+	// surface open. Dev environments without Keycloak must opt out
+	// explicitly via ESV2_DEV_NO_AUTH=true.
 	Enabled bool
+
+	// DevNoAuth (ESV2_DEV_NO_AUTH=true) is the explicit dev-mode override
+	// that disables auth despite the fail-closed default.
+	DevNoAuth bool
 }
 
 type HTTPConfig struct {
@@ -107,7 +119,11 @@ func Load() (*Config, error) {
 	viper.SetDefault("mqtt.keep_alive", 30)
 	viper.SetDefault("mqtt.connect_timeout", 10)
 	viper.SetDefault("mqtt.inverter.share_group", "energystore-inverter")
-	viper.SetDefault("auth.enabled", false)
+	// Fail-closed: auth is ON unless explicitly disabled via
+	// ESV2_DEV_NO_AUTH=true (audit 2026-06-12 — the old default `false`
+	// meant a forgotten env var shipped an unauthenticated REST surface).
+	viper.SetDefault("auth.enabled", true)
+	viper.SetDefault("dev.no_auth", false)
 
 	// viper's AutomaticEnv only binds env vars for keys it knows about.
 	// Keys that don't have a SetDefault must be BindEnv'd explicitly,
@@ -122,8 +138,9 @@ func Load() (*Config, error) {
 		"mqtt.decrypt.key_hex",
 		"mqtt.decrypt.iv_hex",
 		"mqtt.decrypt.gzip",
-		"auth.app_issuer", "auth.app_client_id",
+		"auth.app_issuer", "auth.app_client_id", "auth.app_audience",
 		"auth.api_issuer", "auth.api_client_id", "auth.api_client_secret",
+		"auth.api_audience",
 	} {
 		_ = viper.BindEnv(key)
 	}
@@ -164,12 +181,20 @@ func Load() (*Config, error) {
 		},
 		Auth: AuthConfig{
 			Enabled:         viper.GetBool("auth.enabled"),
+			DevNoAuth:       viper.GetBool("dev.no_auth"),
 			AppIssuer:       viper.GetString("auth.app_issuer"),
 			AppClientID:     viper.GetString("auth.app_client_id"),
+			AppAudience:     viper.GetString("auth.app_audience"),
 			APIIssuer:       viper.GetString("auth.api_issuer"),
 			APIClientID:     viper.GetString("auth.api_client_id"),
 			APIClientSecret: viper.GetString("auth.api_client_secret"),
+			APIAudience:     viper.GetString("auth.api_audience"),
 		},
+	}
+
+	// ESV2_DEV_NO_AUTH=true is the only way to run without auth.
+	if cfg.Auth.DevNoAuth {
+		cfg.Auth.Enabled = false
 	}
 
 	if cfg.DB.DSN == "" {
@@ -179,7 +204,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: mqtt.broker_url is required")
 	}
 	if cfg.Auth.Enabled && (cfg.Auth.AppIssuer == "" || cfg.Auth.AppClientID == "") {
-		return nil, fmt.Errorf("config: auth.enabled requires auth.app_issuer + auth.app_client_id")
+		return nil, fmt.Errorf("config: auth is enabled (fail-closed default) but auth.app_issuer/auth.app_client_id are missing — set ESV2_AUTH_APP_ISSUER + ESV2_AUTH_APP_CLIENT_ID, or opt out explicitly with ESV2_DEV_NO_AUTH=true (dev only)")
 	}
 
 	// Decode the MQTT-decrypt hex key + IV if present. Both must either

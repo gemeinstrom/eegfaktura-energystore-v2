@@ -23,10 +23,14 @@ type KeycloakClient struct {
 }
 
 // NewKeycloakClient performs OIDC discovery against `issuer` and builds the
-// verifier. SkipClientIDCheck mirrors v1 — the audience claim of a
-// platform JWT may name a different client, but the realm is the trust
-// boundary.
-func NewKeycloakClient(ctx context.Context, issuer, clientID, clientSecret string, httpClient *http.Client) (*KeycloakClient, error) {
+// verifier.
+//
+// `audience` controls the JWT `aud` check: when non-empty, tokens must
+// carry it in their audience claim. When empty, SkipClientIDCheck mirrors
+// v1 — the audience claim of a platform JWT may name a different client,
+// and the realm is the trust boundary. Set ESV2_AUTH_APP_AUDIENCE /
+// ESV2_AUTH_API_AUDIENCE to enforce (audit 2026-06-12).
+func NewKeycloakClient(ctx context.Context, issuer, clientID, clientSecret, audience string, httpClient *http.Client) (*KeycloakClient, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -34,9 +38,13 @@ func NewKeycloakClient(ctx context.Context, issuer, clientID, clientSecret strin
 	if err != nil {
 		return nil, fmt.Errorf("auth: oidc discovery %s: %w", issuer, err)
 	}
+	oidcCfg := &oidc.Config{ClientID: audience}
+	if audience == "" {
+		oidcCfg = &oidc.Config{ClientID: clientID, SkipClientIDCheck: true}
+	}
 	return &KeycloakClient{
 		provider:     p,
-		verifier:     p.Verifier(&oidc.Config{ClientID: clientID, SkipClientIDCheck: true}),
+		verifier:     p.Verifier(oidcCfg),
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		http:         httpClient,

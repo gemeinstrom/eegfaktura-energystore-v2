@@ -208,9 +208,16 @@ func (m *Middleware) GQL(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		ctx := context.WithValue(r.Context(), tenantCtxKey, strings.ToUpper(tenant))
+		ctx := WithTenant(r.Context(), strings.ToUpper(tenant))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// WithTenant returns a context carrying the verified tenant. Exposed so
+// tests (and future non-HTTP callers) can construct contexts the way GQL
+// does.
+func WithTenant(ctx context.Context, tenant string) context.Context {
+	return context.WithValue(ctx, tenantCtxKey, tenant)
 }
 
 // ForContextTenant returns the verified tenant stored on the request
@@ -225,8 +232,9 @@ func ForContextTenant(ctx context.Context) string {
 //
 //  1. `X-Tenant` header                — operator service-to-service
 //  2. `tenant` header  (lowercase)     — v1 customer-web GraphQL Convention
-//  3. `ecid` URL path segment          — Backend Convention tenant = ec_id
-//  4. exactly-one tenant in JWT claim  — single-tenant user, unambiguous
+//  3. `tenant` URL path segment        — /api/v1/energy/{tenant}/{ec}/* routes
+//  4. `ecid` URL path segment          — Backend Convention tenant = ec_id
+//  5. exactly-one tenant in JWT claim  — single-tenant user, unambiguous
 //
 // Once a candidate is chosen, it MUST appear in claims.Tenants. Returns
 // (resolved, true) on success or ("", false) when no candidate matches
@@ -244,6 +252,7 @@ func pickTenant(r *http.Request, claims *PlatformClaims) (string, bool) {
 	for _, candidate := range []string{
 		r.Header.Get("X-Tenant"),
 		r.Header.Get("tenant"),
+		r.PathValue("tenant"),
 		r.PathValue("ecid"),
 	} {
 		if candidate == "" {

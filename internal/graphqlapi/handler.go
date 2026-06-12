@@ -227,24 +227,50 @@ func respondGraphQL(w http.ResponseWriter, res *graphql.Result) {
 	_ = json.NewEncoder(w).Encode(res)
 }
 
-// resolveTenantArg picks the tenant from the GraphQL args, falling back
-// to ecId when the customer-web SPA sends an empty/missing tenant. The
-// Pilot Convention is tenant == ec_id (mirrors the backend `Query EEG
-// with TENANT: TE100200` log line). See [[feedback_v2_tenant_from_jwt]]
-// for the broader story.
-func resolveTenantArg(p graphql.ResolveParams) (tenant, ecid string) {
-	tenant, _ = p.Args["tenant"].(string)
+// errTenantMismatch is returned when a client-supplied tenant arg names a
+// different tenant than the JWT-verified one. Cross-tenant reads/writes
+// via the GraphQL args were possible before this check (audit 2026-06-12).
+var errTenantMismatch = errors.New("tenant mismatch")
+
+// resolveTenantArg resolves the tenant for a resolver call.
+//
+// When the request went through auth.GQL, the JWT-verified tenant is on
+// the context (auth.ForContextTenant) and is authoritative: a non-empty
+// client-supplied `tenant` arg that names a DIFFERENT tenant is rejected
+// (fail-explicit), never silently honoured.
+//
+// Without auth middleware (dev/tests mount the engine unprotected) there
+// is no verified tenant; we fall back to the args, with `ecId` covering
+// the customer-web SPA that sends an empty tenant. The Pilot Convention
+// is tenant == ec_id (mirrors the backend `Query EEG with TENANT:
+// TE100200` log line). See [[feedback_v2_tenant_from_jwt]].
+func resolveTenantArg(p graphql.ResolveParams) (tenant, ecid string, err error) {
+	argTenant, _ := p.Args["tenant"].(string)
 	ecid, _ = p.Args["ecId"].(string)
+
+	verified := auth.ForContextTenant(p.Context)
+	if verified != "" {
+		if argTenant != "" && !strings.EqualFold(argTenant, verified) {
+			return "", "", errTenantMismatch
+		}
+		return verified, ecid, nil
+	}
+
+	// No auth middleware in front (dev/tests): args are all we have.
+	tenant = argTenant
 	if tenant == "" {
 		tenant = ecid
 	}
-	return tenant, ecid
+	return tenant, ecid, nil
 }
 
 // resolveLastEnergyDate maps to v1 services.GetLastEnergyEntry: returns
 // the most recent slot timestamp across the EC.
 func (e *Engine) resolveLastEnergyDate(p graphql.ResolveParams) (any, error) {
-	tenant, ecid := resolveTenantArg(p)
+	tenant, ecid, err := resolveTenantArg(p)
+	if err != nil {
+		return "", err
+	}
 	if e.qe == nil {
 		return "", errors.New("query engine not configured")
 	}
@@ -266,7 +292,10 @@ func (e *Engine) resolveLastEnergyDate(p graphql.ResolveParams) (any, error) {
 
 // resolveReport maps to v1 calculation.EnergyReport.
 func (e *Engine) resolveReport(p graphql.ResolveParams) (any, error) {
-	tenant, _ := resolveTenantArg(p)
+	tenant, _, err := resolveTenantArg(p)
+	if err != nil {
+		return nil, err
+	}
 	year, _ := p.Args["year"].(int)
 	segment, _ := p.Args["segment"].(int)
 	period, _ := p.Args["period"].(string)
@@ -278,7 +307,10 @@ func (e *Engine) resolveReport(p graphql.ResolveParams) (any, error) {
 
 // resolveSingleUpload runs the XLSX importer on the uploaded file.
 func (e *Engine) resolveSingleUpload(p graphql.ResolveParams) (any, error) {
-	tenant, ecid := resolveTenantArg(p)
+	tenant, ecid, err := resolveTenantArg(p)
+	if err != nil {
+		return false, err
+	}
 	sheet, _ := p.Args["sheet"].(string)
 	if e.calc == nil || e.repo == nil || e.store == nil {
 		return false, errors.New("dependencies not configured")
@@ -294,8 +326,7 @@ func (e *Engine) resolveSingleUpload(p graphql.ResolveParams) (any, error) {
 		Repository: e.repo,
 		Store:      e.store,
 	}
-	_, _, err := im.ImportReader(p.Context, f.Body)
-	if err != nil {
+	if _, _, err := im.ImportReader(p.Context, f.Body); err != nil {
 		return false, err
 	}
 	return true, nil
