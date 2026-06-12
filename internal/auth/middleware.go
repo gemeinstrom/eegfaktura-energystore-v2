@@ -208,9 +208,16 @@ func (m *Middleware) GQL(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		ctx := context.WithValue(r.Context(), tenantCtxKey, strings.ToUpper(tenant))
+		ctx := WithTenant(r.Context(), strings.ToUpper(tenant))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// WithTenant returns a context carrying the verified tenant. Exposed so
+// tests (and future non-HTTP callers) can construct contexts the way GQL
+// does.
+func WithTenant(ctx context.Context, tenant string) context.Context {
+	return context.WithValue(ctx, tenantCtxKey, tenant)
 }
 
 // ForContextTenant returns the verified tenant stored on the request
