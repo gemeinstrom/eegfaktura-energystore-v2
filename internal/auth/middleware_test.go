@@ -181,6 +181,31 @@ func TestProtectApp_ExplicitTenantMismatchStillForbidden(t *testing.T) {
 	}
 }
 
+func TestProtectApp_TenantPathSegment(t *testing.T) {
+	// The /api/v1/energy/{tenant}/{ec}/* routes carry the tenant in the
+	// URL. Without any tenant header, pickTenant must consider the path
+	// value — and 403 when it's not in the claims.
+	m := New(&fakeVerifier{tok: &fakeIDToken{claims: PlatformClaims{Tenants: []string{"VFEEG"}}}}, nil, Options{})
+
+	r := httptest.NewRequest("GET", "/api/v1/energy/vfeeg/TE100200/range", nil)
+	r.SetPathValue("tenant", "vfeeg")
+	r.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	m.ProtectApp(okHandler()).ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 via tenant path segment, got %d", rec.Code)
+	}
+
+	r = httptest.NewRequest("GET", "/api/v1/energy/other/TE100200/range", nil)
+	r.SetPathValue("tenant", "other")
+	r.Header.Set("Authorization", "Bearer x")
+	rec = httptest.NewRecorder()
+	m.ProtectApp(okHandler()).ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for foreign path tenant, got %d", rec.Code)
+	}
+}
+
 func TestProtectAPI_OK(t *testing.T) {
 	m := New(nil, &fakePasswordVerifier{
 		tok: &fakeIDToken{claims: PlatformClaims{Tenants: []string{"VFEEG"}}},

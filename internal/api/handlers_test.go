@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
 )
@@ -160,6 +161,53 @@ func TestRangeOK(t *testing.T) {
 	}
 	if body.Count != 1 {
 		t.Fatalf("expected count=1, got %d", body.Count)
+	}
+}
+
+func TestRangeRequiresAuthWhenConfigured(t *testing.T) {
+	// With auth middleware configured, the /api/v1 routes must reject
+	// requests without a bearer token (they were unprotected before the
+	// 2026-06-12 audit fix).
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("pgxmock: %v", err)
+	}
+	defer mock.Close()
+	srv := NewWithOptions(store.FromPool(mock), Options{
+		Auth: auth.New(nil, nil, auth.Options{}),
+	})
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/energy/vfeeg/TE100200/range?mp=AT00100&code=G.01", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 without token, got %d", rec.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("no DB query expected: %v", err)
+	}
+}
+
+func TestTenantFromPathMismatch(t *testing.T) {
+	// Path tenant differing from the JWT-verified tenant is fail-explicit.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/energy/other/TE100200/range", nil)
+	req.SetPathValue("tenant", "other")
+	rec := httptest.NewRecorder()
+	if _, ok := tenantFromPath(rec, req, "VFEEG"); ok {
+		t.Fatal("expected mismatch rejection")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestTenantFromPathMatchCaseInsensitive(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/energy/vfeeg/TE100200/range", nil)
+	req.SetPathValue("tenant", "vfeeg")
+	rec := httptest.NewRecorder()
+	got, ok := tenantFromPath(rec, req, "VFEEG")
+	if !ok || got != "vfeeg" {
+		t.Fatalf("expected path tenant accepted verbatim, got %q ok=%v", got, ok)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/auth"
@@ -90,8 +91,8 @@ func NewWithOptions(s *store.Store, opts Options) *Server {
 func (s *Server) routes() {
 	s.handle("GET /healthz", s.handleHealth)
 	s.handle("GET /readyz", s.handleReady)
-	s.handle("GET /api/v1/energy/{tenant}/{ec}/range", s.handleRange)
-	s.handle("GET /api/v1/energy/{tenant}/{ec}/last-record-date", s.handleLastRecordDate)
+	s.handle("GET /api/v1/energy/{tenant}/{ec}/range", s.protect(s.handleRange))
+	s.handle("GET /api/v1/energy/{tenant}/{ec}/last-record-date", s.protect(s.handleLastRecordDate))
 	if s.metrics != nil {
 		s.mux.Handle("GET /metrics", s.metrics.Handler())
 	}
@@ -127,7 +128,9 @@ func (s *Server) handle(pattern string, h http.HandlerFunc) {
 //  2. `tenant`  header   (v1 customer-web GraphQL Convention, also used
 //                         by the customer-web SPA for REST when running
 //                         against unprotected energystore)
-//  3. `ecid` path segment (last-resort fallback — Backend nutzt
+//  3. `tenant` path segment (die /api/v1/energy/{tenant}/{ec}/*-Routen
+//                          tragen den Tenant in der URL)
+//  4. `ecid` path segment (last-resort fallback — Backend nutzt
 //                          `tenant = ec_id` als Default-Convention; das
 //                          v1-Backend logged exakt das ebenfalls als
 //                          "Query EEG with TENANT: TE100200")
@@ -140,6 +143,9 @@ func resolveTenant(r *http.Request) string {
 		return t
 	}
 	if t := r.Header.Get("tenant"); t != "" {
+		return t
+	}
+	if t := r.PathValue("tenant"); t != "" {
 		return t
 	}
 	if t := r.PathValue("ecid"); t != "" {
@@ -185,8 +191,32 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func (s *Server) handleRange(w http.ResponseWriter, r *http.Request) {
-	tenant := r.PathValue("tenant")
+// tenantFromPath returns the URL-path tenant after checking it against
+// the verified tenant from the auth middleware. An explicit path tenant
+// that names a different tenant than the JWT-verified one is a hard 403
+// (fail-explicit) — never silently substituted. Returns ok=false after
+// writing the error response.
+//
+// The path value (original casing) is returned so DB lookups behave
+// exactly as before for dev setups where the middleware is absent.
+func tenantFromPath(w http.ResponseWriter, r *http.Request, verified string) (string, bool) {
+	pathTenant := r.PathValue("tenant")
+	if pathTenant == "" {
+		writeError(w, http.StatusBadRequest, "missing tenant path segment")
+		return "", false
+	}
+	if verified != "" && !strings.EqualFold(pathTenant, verified) {
+		writeError(w, http.StatusForbidden, "tenant mismatch")
+		return "", false
+	}
+	return pathTenant, true
+}
+
+func (s *Server) handleRange(w http.ResponseWriter, r *http.Request, _ *auth.PlatformClaims, verified string) {
+	tenant, ok := tenantFromPath(w, r, verified)
+	if !ok {
+		return
+	}
 	ec := r.PathValue("ec")
 	mp := r.URL.Query().Get("mp")
 	code := r.URL.Query().Get("code")
@@ -208,8 +238,11 @@ func (s *Server) handleRange(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"slots": slots, "count": len(slots)})
 }
 
-func (s *Server) handleLastRecordDate(w http.ResponseWriter, r *http.Request) {
-	tenant := r.PathValue("tenant")
+func (s *Server) handleLastRecordDate(w http.ResponseWriter, r *http.Request, _ *auth.PlatformClaims, verified string) {
+	tenant, ok := tenantFromPath(w, r, verified)
+	if !ok {
+		return
+	}
 	ec := r.PathValue("ec")
 	mp := r.URL.Query().Get("mp")
 	code := r.URL.Query().Get("code")
