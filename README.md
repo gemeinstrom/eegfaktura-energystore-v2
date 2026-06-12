@@ -15,21 +15,35 @@ for the architectural rationale.
 
 ## Status
 
-**Skeleton.** This repo currently contains:
+Implemented:
 
-- Long-schema DDL (`migrations/0001_init.sql`) — hypertable, compression,
-  continuous aggregates.
-- Module layout (`cmd/`, `internal/store`, `internal/mqtt`, `internal/api`,
-  `internal/config`).
-- Multi-stage distroless Dockerfile.
-- GitHub Actions skeleton (build, security scans).
+- TimescaleDB store driver (`internal/store/`) with hypertable +
+  compression + continuous aggregates from `migrations/0001_init.sql`.
+- MQTT 5 consumer (`internal/mqtt/`) with shared-subscription support
+  (paho.golang) and dead-letter queue (`dlq_writes_total` Prometheus
+  counter).
+- REST API handlers (`internal/api/`) at parity with v1's `/api/v1/...`
+  surface, plus `/healthz` + `/readyz` + `/metrics`.
+- GraphQL API (`internal/graphqlapi/`).
+- OIDC/JWT auth middleware (`internal/auth/`) with Keycloak discovery,
+  tenant-claim binding, and admin-vs-member protection.
+- Structured logging via `log/slog`.
+- Counterpoint metadata CRUD (`internal/counterpoint/`).
+- Decryption layer for prod-MQTT CR_MSG payload (`internal/decode/`,
+  ENV-gated, default-off for Pilot).
+- Excel export + XLSX import.
+- Migration tooling (`internal/migrate/`) for Plan-B Batch-ETL from v1
+  BadgerDB.
 
-Not yet implemented:
+Open:
 
-- TimescaleDB store driver.
-- MQTT-5 Shared Subscription consumer.
-- HTTP/REST API handlers (parity with v1's `/api/v1/...` surface).
-- Migration tooling for Plan-B Batch-ETL from v1 BadgerDB.
+- CORS middleware — currently unused because the customer-web reaches
+  v2 same-origin via Caddy/ingress, but required for cross-origin
+  clients ([#22](https://github.com/gemeinstrom/eegfaktura-energystore-v2/issues/22)).
+- Phase-2: ELWG-Refactor — T/R-Slots, Mehrfachteilnahme, P2P,
+  Eigennutzung ([#40](https://github.com/gemeinstrom/eegfaktura-energystore-v2/issues/40)).
+- Phase-2: Smart Nachfordern — `GET /eeg/{ecid}/completeness`
+  ([#43](https://github.com/gemeinstrom/eegfaktura-energystore-v2/issues/43)).
 
 
 ## Architecture summary
