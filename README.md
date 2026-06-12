@@ -15,12 +15,6 @@ for the architectural rationale.
 
 ## Status
 
-**Live in pilot since 2026-06-06.** The service runs as the active
-energy-data backend in the `eeg-pilot` cluster. v1 is held at
-`replicas=0` as rollback reserve; both `eegfaktura-energystore` and
-`eegfaktura-energystore-v2` k8s services route to the v2 pod via
-selector-sharing.
-
 Implemented:
 
 - TimescaleDB store driver (`internal/store/`) with hypertable +
