@@ -352,15 +352,33 @@ func buildAuth(ctx context.Context, cfg config.AuthConfig, logger *slog.Logger) 
 	return auth.FromKeycloak(appKC, apiKC, auth.Options{Logger: logger}), nil
 }
 
-// tenantFromTopic extracts the tenant from a broker topic of the form
-// `eegfaktura/<tenant>/energy/<...>`. Returns "" if the topic doesn't
-// match the expected shape.
+// tenantFromTopic extracts the tenant from a broker topic. Two shapes
+// are recognised:
+//
+//   - Pilot/v1-inverter shape: `eegfaktura/<tenant>/energy/<...>` (or
+//     any second-segment-is-tenant shape). The tenant is returned
+//     verbatim — no case folding, to preserve existing pilot inverter
+//     write-path behaviour.
+//
+//   - Prod-EDA-energy shape: `eda/response/energy/<tenant>` — published
+//     by eegfaktura-eda-comm's `MqttPublisher` as
+//     `${energyTopic}/${receiver.toLowerCase}`. The receiver maps to
+//     the tenant (e.g. `cc100153` → `CC100153`); we upper-case it to
+//     match the rest of the v2 stack (auth/middleware.go consistently
+//     `strings.ToUpper`s the tenant) so DB queries from the customer-
+//     web join the row written here.
+//
+// Returns "" if neither shape matches.
 func tenantFromTopic(topic string) string {
 	parts := strings.Split(topic, "/")
-	if len(parts) < 2 {
+	switch {
+	case len(parts) >= 4 && parts[0] == "eda" && parts[1] == "response" && parts[2] == "energy":
+		return strings.ToUpper(parts[3])
+	case len(parts) >= 2:
+		return parts[1]
+	default:
 		return ""
 	}
-	return parts[1]
 }
 
 // corsOriginsFromEnv returns the comma-split ESV2_CORS_ALLOWED_ORIGINS,

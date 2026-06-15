@@ -15,12 +15,21 @@ import (
 
 func TestTenantFromTopic(t *testing.T) {
 	cases := map[string]string{
+		// Pilot/v1-inverter shape: tenant verbatim from position [1].
 		"eegfaktura/vfeeg/energy/TE100200":        "vfeeg",
 		"eegfaktura/vfeeg/energy/TE100200/extras": "vfeeg",
-		"eegfaktura/":                             "",
-		"":                                        "",
-		"single":                                  "",
 		"a/b":                                     "b",
+		// Prod-EDA-energy shape: tenant from position [3], upper-cased.
+		// eegfaktura-eda-comm publishes as
+		// `${energyTopic}/${receiver.toLowerCase}` with energyTopic =
+		// "eda/response/energy" → CC100153 case below.
+		"eda/response/energy/cc100153":         "CC100153",
+		"eda/response/energy/te100200":         "TE100200",
+		"eda/response/energy/cc100153/garbage": "CC100153",
+		// Degenerate inputs.
+		"eegfaktura/": "",
+		"":            "",
+		"single":      "",
 	}
 	for in, want := range cases {
 		if got := tenantFromTopic(in); got != want {
