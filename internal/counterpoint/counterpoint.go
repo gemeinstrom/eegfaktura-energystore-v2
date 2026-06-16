@@ -202,6 +202,18 @@ func (r *Repository) Upsert(ctx context.Context, cp CounterPoint) error {
 // between a separate MAX query and the INSERT. ON CONFLICT DO NOTHING
 // keeps the existing row (including its source_idx) intact — the
 // upsert-style updater stays on Repository.Upsert.
+// ensureForMeterSQL writes a counterpoint_meta row with non-NULL period
+// dates so the customer-web `periodsSelector` can derive the Lastverlauf
+// popover's Year/Halbjahr/Quartal/Monat range. Both fields are set to
+// `now()` initially — prod-paritätisch period_start is the date of the
+// first data point and period_end the date of the last. On the upsert
+// path we don't yet know either, so we seed with the upsert timestamp;
+// a future "backfill" step (or the existing SQL data fix) can tighten
+// the values based on the actual energy_data MIN/MAX.
+//
+// A naive far-future sentinel like 2999-12-31 would explode
+// `generatePeriodOptions` — it iterates beginYear..endYear and emits
+// every year/half/quarter/month, so 973-year range = ~4000 options.
 const ensureForMeterSQL = `
 INSERT INTO counterpoint_meta
     (tenant_id, ec_id, metering_point, direction, source_idx,
@@ -210,7 +222,9 @@ SELECT $1, $2, $3, $4,
        COALESCE((SELECT MAX(source_idx) + 1
                  FROM counterpoint_meta
                  WHERE tenant_id = $1 AND ec_id = $2 AND direction = $4), 0),
-       NULL, NULL, $5, now()
+       now()::date,
+       now()::date,
+       $5, now()
 ON CONFLICT (tenant_id, ec_id, metering_point) DO NOTHING`
 
 // EnsureForMeter creates a counterpoint_meta row for the supplied
