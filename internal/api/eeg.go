@@ -149,21 +149,35 @@ func (s *Server) handleLoadCurveReport(w http.ResponseWriter, r *http.Request, _
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// pickLoadCurve dispatches between daily LoadCurve and MonthlyCurve
-// based on the requested range. Used by both /load-curve-report (called
-// from the property popover) and /combined-report (initial dashboard
-// load) so the Lastverlauf chart looks the same in both paths.
+// pickLoadCurve dispatches between Daily, Weekly and Monthly LoadCurve
+// based on the requested range — matches the period-based aggregation
+// the customer-web property popover triggers via /load-curve-report and
+// the dashboard initialiser via /combined-report. Prod sample headers:
 //
-// Threshold ~ 184 days: Year (365) and Halbjahr (~184) → month bars,
-// Quartal (90) and Monat (30) → day bars. Matches the period_displayString
-// convention the customer-web popover sends.
+//	Period   Range    prod-Name shape
+//	-------  ------   ----------------
+//	Monat    ~30 d    D:MM:DD:DOW (daily)
+//	Quartal  ~91 d    W:YYYY:WW:WW (ISO-week)
+//	Halbjahr ~181 d   M:YYYY:MM:MM (calendar month)
+//	Jahr     ~365 d   M:YYYY:MM:MM (calendar month)
+//
+// Threshold picks: > 120 d → monthly (covers Halbjahr 181d + Year 365d),
+// 50 d < range ≤ 120 d → weekly (Quartal 91d), ≤ 50 d → daily (Monat).
 func pickLoadCurve(ctx context.Context, qe *queryengine.Engine,
 	tenant, ecid string, start, end time.Time) ([]*queryengine.ReportData, error) {
-	const monthlySwitchDays = 184
-	if end.Sub(start) > time.Duration(monthlySwitchDays)*24*time.Hour {
+	const (
+		monthlySwitchDays = 120
+		weeklySwitchDays  = 50
+	)
+	d := end.Sub(start)
+	switch {
+	case d > time.Duration(monthlySwitchDays)*24*time.Hour:
 		return qe.QueryMonthlyCurveReport(ctx, tenant, ecid, start, end)
+	case d > time.Duration(weeklySwitchDays)*24*time.Hour:
+		return qe.QueryWeeklyCurveReport(ctx, tenant, ecid, start, end)
+	default:
+		return qe.QueryLoadCurveReport(ctx, tenant, ecid, start, end)
 	}
-	return qe.QueryLoadCurveReport(ctx, tenant, ecid, start, end)
 }
 
 // handleCombinedReport implements the dashboard's combined fetch:

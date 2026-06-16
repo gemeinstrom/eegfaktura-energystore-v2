@@ -290,6 +290,55 @@ func TestQueryEngine_MonthlyCurve(t *testing.T) {
 	}
 }
 
+// TestQueryEngine_WeeklyCurve covers the prod Quartal-View Wochen-
+// Aggregation: producer slots in two distinct ISO-weeks of June land in
+// two W:YYYY:WW:WW buckets.
+func TestQueryEngine_WeeklyCurve(t *testing.T) {
+	eng, mock := newMockEngine(t)
+	defer mock.Close()
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 30, 23, 45, 0, 0, time.UTC)
+
+	now := time.Now()
+	expectMeta(mock, metaRows(mock).
+		AddRow("vfeeg", "TE100200", "AT_PROD1",
+			int16(counterpoint.DirectionProducer), 0,
+			(*time.Time)(nil), (*time.Time)(nil), []byte(`{}`), now))
+
+	// Two timestamps in two adjacent ISO weeks (2026-W23 and 2026-W24).
+	rows := slotRows(mock)
+	for _, ts := range []time.Time{
+		time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC),  // ISO week 23
+		time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC),  // ISO week 24
+	} {
+		rows.AddRow(ts, "AT_PROD1", "1-1:2.9.0 G.01", float64(2.0), int16(1))
+		rows.AddRow(ts, "AT_PROD1", "1-1:2.9.0 P.01", float64(1.0), int16(1))
+	}
+	expectSlots(mock, start, end, rows)
+
+	res, err := eng.QueryWeeklyCurveReport(context.Background(), "vfeeg", "TE100200", start, end)
+	if err != nil {
+		t.Fatalf("weekly: %v", err)
+	}
+	// Two named weeks (W23, W24) + zero-filled gap (W23 sits inside the
+	// engine-Query gap-fill stream — count what comes back, just verify
+	// the two W23/W24 buckets exist and carry the production).
+	wantWeeks := map[string]bool{"W:2026:23:23": false, "W:2026:24:24": false}
+	for _, b := range res {
+		if _, ok := wantWeeks[b.Name]; ok {
+			wantWeeks[b.Name] = true
+			if b.Produced < 1.9 || b.Produced > 2.1 {
+				t.Errorf("%s produced: got %v want ~2.0", b.Name, b.Produced)
+			}
+		}
+	}
+	for name, seen := range wantWeeks {
+		if !seen {
+			t.Errorf("expected %s in result (got %d buckets)", name, len(res))
+		}
+	}
+}
+
 func TestParseRawFunction(t *testing.T) {
 	cases := []struct {
 		in   string

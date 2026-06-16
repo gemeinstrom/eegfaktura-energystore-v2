@@ -33,6 +33,21 @@ func (e *Engine) QueryLoadCurveReport(ctx context.Context, tenant, ec string,
 	return lc.GetResult(), nil
 }
 
+// QueryWeeklyCurveReport: aggregate per ISO calendar week, emitting
+// `W:YYYY:WW:WW`-shaped names. Used by the combined/load-curve dispatch
+// for medium-range queries (Quartal / Halbjahr).
+func (e *Engine) QueryWeeklyCurveReport(ctx context.Context, tenant, ec string,
+	start, end time.Time) ([]*ReportData, error) {
+	wc := NewWeeklyCurveFunction()
+	if err := e.Query(ctx, tenant, ec, start, end, wc); err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return []*ReportData{}, nil
+		}
+		return nil, err
+	}
+	return wc.GetResult(), nil
+}
+
 // QueryMonthlyCurveReport: aggregate per calendar month, emitting
 // `M:YYYY:MM:00` shaped names. Used by the combined-report dispatcher
 // when the requested range is too long for daily granularity to be
