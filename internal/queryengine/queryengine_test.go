@@ -155,6 +155,67 @@ func TestQueryEngine_IntraDay24Buckets(t *testing.T) {
 	}
 }
 
+// TestQueryEngine_IntraDayLargeStartGap reproduces the dashboard bug we
+// hit in pilot CC100153: the frontend asks for the full year (Start =
+// Jan 1) but real data only exists from late April. Before the fix, the
+// bucket cursor (`cacheTime`) was anchored to Start and only advanced
+// by 1h per emitted slot. The first ~~13k 15-min slots therefore landed
+// in different buckets — the 488 kWh of PV produced was smeared across
+// all 24 hour-of-day labels instead of falling into the 13:00 bucket
+// where it belongs.
+//
+// Fix is in engine.Query: it now anchors EngineContext.Start to the
+// first real slot's ts before invoking HandleStart, so the cache cursor
+// is synchronised with the data window.
+func TestQueryEngine_IntraDayLargeStartGap(t *testing.T) {
+	eng, mock := newMockEngine(t)
+	defer mock.Close()
+	// Frontend-typical year-spanning request.
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local)
+	end := time.Date(2026, 12, 31, 23, 45, 0, 0, time.Local)
+
+	now := time.Now()
+	expectMeta(mock, metaRows(mock).
+		AddRow("vfeeg", "TE100200", "AT_PROD1",
+			int16(counterpoint.DirectionProducer), 0,
+			(*time.Time)(nil), (*time.Time)(nil), []byte(`{}`), now))
+
+	// Data only on a single afternoon, hour 13 UTC. Four 15-min slots
+	// totalling 4.0 kWh of producer P.01.
+	day := time.Date(2026, 5, 15, 13, 0, 0, 0, time.UTC)
+	rows := slotRows(mock)
+	for i := 0; i < 4; i++ {
+		ts := day.Add(time.Duration(i) * 15 * time.Minute)
+		rows.AddRow(ts, "AT_PROD1", "1-1:2.9.0 G.01", float64(1.0), int16(1))
+		rows.AddRow(ts, "AT_PROD1", "1-1:2.9.0 P.01", float64(0.5), int16(1))
+	}
+	expectSlots(mock, start, end, rows)
+
+	res, err := eng.QueryIntraDayReport(context.Background(), "vfeeg", "TE100200", start, end)
+	if err != nil {
+		t.Fatalf("intraday: %v", err)
+	}
+	if len(res) != 24 {
+		t.Fatalf("expected 24 buckets, got %d", len(res))
+	}
+	// Every bucket except 13 must be zero. Pre-fix this would fail
+	// because the produced 4.0 kWh was spread across all hours.
+	var nonZeroBuckets []int
+	for i, b := range res {
+		if b.Produced != 0 {
+			nonZeroBuckets = append(nonZeroBuckets, i)
+		}
+	}
+	if len(nonZeroBuckets) != 1 || nonZeroBuckets[0] != 13 {
+		t.Fatalf("expected only bucket 13 to be non-zero, got buckets %v (full=%+v)",
+			nonZeroBuckets, res)
+	}
+	// 4 slots × 1.0 (G.01 = producer[0] = Produced) = 4.0.
+	if got := res[13].Produced; got < 3.9 || got > 4.1 {
+		t.Errorf("bucket 13 produced: got %v want ~4.0", got)
+	}
+}
+
 func TestQueryEngine_LoadCurveEmpty(t *testing.T) {
 	eng, mock := newMockEngine(t)
 	defer mock.Close()

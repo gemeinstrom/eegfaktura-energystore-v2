@@ -62,18 +62,30 @@ func (e *Engine) Query(ctx context.Context, tenant, ec string, start, end time.T
 		return err
 	}
 
-	engCtx := buildEngineCtx(loader, start, end)
+	// v1 (store/engine.go) peeks the first row to learn the effective
+	// data start, then builds the EngineContext with that as `start` so
+	// the bucket cursor (cacheTime) is synchronised with the first real
+	// slot. Without this the year-spanning report endpoints (intraday,
+	// loadcurve) end up with `cacheTime` lagging months behind `ts`,
+	// flushing one slot per bucket and smearing all data across every
+	// hour-of-day / day-of-year label.
+	var (
+		engCtx      *EngineContext
+		started     bool
+		prev        *time.Time
+		seen        bool
+		ensureStart func(firstTS time.Time) error
+	)
 
-	// v1 walks the iterator once to determine the effective start of the
-	// data window, then re-emits all rows with gap-filling. We can do
-	// the same in one pass: track whether we've seen the first line,
-	// fill gaps in addLine, and emit the EOR signal.
-	if err := consumer.HandleStart(engCtx); err != nil {
-		return err
+	ensureStart = func(firstTS time.Time) error {
+		if started {
+			return nil
+		}
+		engCtx = buildEngineCtx(loader, firstTS, end)
+		started = true
+		return consumer.HandleStart(engCtx)
 	}
 
-	var seen bool
-	var prev *time.Time
 	const slotDur = 15 * time.Minute
 
 	err = loader.emit(ctx, func(line *RawSourceLine) error {
@@ -81,6 +93,10 @@ func (e *Engine) Query(ctx context.Context, tenant, ec string, start, end time.T
 		ts, perr := parseRowIDTS(line.ID)
 		if perr != nil {
 			return perr
+		}
+
+		if err := ensureStart(ts); err != nil {
+			return err
 		}
 
 		// gap fill — v1 fills missing 15-min slots with zero lines.
@@ -170,6 +186,16 @@ func (c *cache) init(ctx *EngineContext) error {
 // cacheLine accumulates `line` into the current bucket. When the line
 // crosses the bucket boundary it flushes via `flush` and starts a new
 // bucket.
+//
+// Gap handling: if `ts` is many bucket widths past `cacheTime` (e.g. the
+// query window starts on Jan 1 but the first real slot is in April), we
+// MUST jump `cacheTime` forward by enough whole bucket widths so the
+// next bucket actually contains `ts`. Without that catch-up,
+// `cacheTime` only advances by one cacheTs per flushed slot — every
+// 15-min slot ends up in a different bucket label, smearing the
+// dataset across all hour-of-day / day-of-year buckets. The same bug
+// applies symmetrically to LoadCurve (cacheTs=24h): one slot per
+// calendar day until cacheTime catches up.
 func (c *cache) cacheLine(ctx *EngineContext, ts time.Time, line *RawSourceLine,
 	flush func(*EngineContext, time.Time, *RawSourceLine) error) error {
 	if ts.Before(c.cacheTime) {
@@ -178,8 +204,13 @@ func (c *cache) cacheLine(ctx *EngineContext, ts time.Time, line *RawSourceLine,
 	if err := flush(ctx, c.cacheTime, &c.cache); err != nil {
 		return err
 	}
-	c.cache = line.DeepCopy(ctx.CountCons, ctx.CountProd)
 	c.cacheTime = c.cacheTime.Add(c.cacheTs)
+	if !ts.Before(c.cacheTime) {
+		gap := ts.Sub(c.cacheTime)
+		steps := int64(gap/c.cacheTs) + 1
+		c.cacheTime = c.cacheTime.Add(time.Duration(steps) * c.cacheTs)
+	}
+	c.cache = line.DeepCopy(ctx.CountCons, ctx.CountProd)
 	return nil
 }
 
