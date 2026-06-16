@@ -165,6 +165,24 @@ func TestEnergyReportV2_NoRows(t *testing.T) {
 	if report.ID == "" {
 		t.Error("expected ID to be set even on no rows")
 	}
+	// Every meter must have a non-nil Report (v1-parity / prod-compat).
+	// Without ensureMeterReports the SPA crashes at m.report.summary
+	// because the Go-zero `*Report = nil` marshals to JSON `null`.
+	for prIdx, pr := range report.ParticipantReports {
+		for mIdx, m := range pr.Meters {
+			if m.Report == nil {
+				t.Fatalf("participantReports[%d].meters[%d].Report is nil — expected zero-Report",
+					prIdx, mIdx)
+			}
+			if m.Report.Intermediate.Consumption == nil ||
+				m.Report.Intermediate.Utilization == nil ||
+				m.Report.Intermediate.Allocation == nil ||
+				m.Report.Intermediate.Production == nil {
+				t.Errorf("participantReports[%d].meters[%d]: intermediate slices must be initialised to []",
+					prIdx, mIdx)
+			}
+		}
+	}
 }
 
 // Compile-time check that queryengine.QueryFunction is satisfied.

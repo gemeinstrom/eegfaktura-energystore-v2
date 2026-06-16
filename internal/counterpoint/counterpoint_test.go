@@ -140,6 +140,44 @@ func TestUpsertOK(t *testing.T) {
 	}
 }
 
+func TestEnsureForMeter_RequiresFields(t *testing.T) {
+	r, mock := newRepo(t)
+	defer mock.Close()
+	if err := r.EnsureForMeter(context.Background(), "", "ec", "mp", DirectionConsumer); err == nil {
+		t.Error("expected error for empty tenant")
+	}
+	if err := r.EnsureForMeter(context.Background(), "t", "", "mp", DirectionConsumer); err == nil {
+		t.Error("expected error for empty ec")
+	}
+	if err := r.EnsureForMeter(context.Background(), "t", "ec", "", DirectionConsumer); err == nil {
+		t.Error("expected error for empty meteringPoint")
+	}
+	if err := r.EnsureForMeter(context.Background(), "t", "ec", "mp", 0); err == nil {
+		t.Error("expected error for invalid direction")
+	}
+}
+
+func TestEnsureForMeter_OK(t *testing.T) {
+	r, mock := newRepo(t)
+	defer mock.Close()
+	// Direction-keyed source_idx auto-pick + ON CONFLICT DO NOTHING.
+	// We don't pin the SQL text — just verify args + that no error is
+	// thrown when the row is new.
+	mock.ExpectExec(`INSERT INTO counterpoint_meta`).
+		WithArgs("vfeeg", "TE100200", "AT00100",
+			int16(DirectionConsumer),
+			[]byte(`{"name":"AT00100"}`),
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	if err := r.EnsureForMeter(context.Background(),
+		"vfeeg", "TE100200", "AT00100", DirectionConsumer); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestGetNotFound(t *testing.T) {
 	r, mock := newRepo(t)
 	defer mock.Close()
