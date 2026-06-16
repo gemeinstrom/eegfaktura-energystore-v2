@@ -202,19 +202,18 @@ func (r *Repository) Upsert(ctx context.Context, cp CounterPoint) error {
 // between a separate MAX query and the INSERT. ON CONFLICT DO NOTHING
 // keeps the existing row (including its source_idx) intact — the
 // upsert-style updater stays on Repository.Upsert.
-// ensureForMeterSQL writes a counterpoint_meta row with PROD-PARITÄTISCH
-// sentinel period dates instead of NULL:
+// ensureForMeterSQL writes a counterpoint_meta row with non-NULL period
+// dates so the customer-web `periodsSelector` can derive the Lastverlauf
+// popover's Year/Halbjahr/Quartal/Monat range. Both fields are set to
+// `now()` initially — prod-paritätisch period_start is the date of the
+// first data point and period_end the date of the last. On the upsert
+// path we don't yet know either, so we seed with the upsert timestamp;
+// a future "backfill" step (or the existing SQL data fix) can tighten
+// the values based on the actual energy_data MIN/MAX.
 //
-//	period_start = Jan-1 of the current calendar year
-//	period_end   = 2999-12-31 (the "never expires" sentinel prod ships)
-//
-// Why this matters: the customer-web `periodsSelector` reduces
-// `period_start`/`period_end` across all meters to compute the chart
-// property popover's available year range. With NULL values both fields
-// fall back to empty strings, `generatePeriodOptions` produces no
-// entries, and the Lastverlauf-Property-Popover dropdowns render empty
-// (no Jan-Dez 2026, no Halbjahr/Quartal/Monat option). Prod meta rows
-// always carry these dates, so we mirror the shape on the upsert path.
+// A naive far-future sentinel like 2999-12-31 would explode
+// `generatePeriodOptions` — it iterates beginYear..endYear and emits
+// every year/half/quarter/month, so 973-year range = ~4000 options.
 const ensureForMeterSQL = `
 INSERT INTO counterpoint_meta
     (tenant_id, ec_id, metering_point, direction, source_idx,
@@ -223,8 +222,8 @@ SELECT $1, $2, $3, $4,
        COALESCE((SELECT MAX(source_idx) + 1
                  FROM counterpoint_meta
                  WHERE tenant_id = $1 AND ec_id = $2 AND direction = $4), 0),
-       date_trunc('year', now())::date,
-       DATE '2999-12-31',
+       now()::date,
+       now()::date,
        $5, now()
 ON CONFLICT (tenant_id, ec_id, metering_point) DO NOTHING`
 
