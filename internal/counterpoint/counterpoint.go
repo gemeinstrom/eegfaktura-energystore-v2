@@ -190,6 +190,53 @@ func (r *Repository) Upsert(ctx context.Context, cp CounterPoint) error {
 	return nil
 }
 
+// ensureForMeterSQL atomically creates a counterpoint_meta row if one
+// does not yet exist for (tenant, ec, metering_point), picking the
+// next free source_idx within the (tenant, ec, direction) namespace.
+// We need this for the MQTT-Ingest path — until now `counterpoint_meta`
+// was only populated by the XLSX-Importer, so fresh tenants whose data
+// arrived only via MQTT had empty meta and EnergyReportV2 returned
+// `report: null` per meter, crashing the customer-web SPA.
+//
+// `source_idx` is derived inside the same statement to avoid TOCTOU
+// between a separate MAX query and the INSERT. ON CONFLICT DO NOTHING
+// keeps the existing row (including its source_idx) intact — the
+// upsert-style updater stays on Repository.Upsert.
+const ensureForMeterSQL = `
+INSERT INTO counterpoint_meta
+    (tenant_id, ec_id, metering_point, direction, source_idx,
+     period_start, period_end, payload, updated_at)
+SELECT $1, $2, $3, $4,
+       COALESCE((SELECT MAX(source_idx) + 1
+                 FROM counterpoint_meta
+                 WHERE tenant_id = $1 AND ec_id = $2 AND direction = $4), 0),
+       NULL, NULL, $5, now()
+ON CONFLICT (tenant_id, ec_id, metering_point) DO NOTHING`
+
+// EnsureForMeter creates a counterpoint_meta row for the supplied
+// (tenant, ec, meteringPoint, direction) if none exists, otherwise
+// returns nil silently. Designed for the MQTT-Ingest path: idempotent,
+// no ON CONFLICT updates so the existing source_idx and period
+// fields are preserved.
+func (r *Repository) EnsureForMeter(ctx context.Context,
+	tenant, ec, mp string, direction Direction) error {
+	if tenant == "" || ec == "" || mp == "" {
+		return errors.New("counterpoint: tenant, ec and meteringPoint are required")
+	}
+	if direction != DirectionConsumer && direction != DirectionProducer {
+		return fmt.Errorf("counterpoint: invalid direction %d", direction)
+	}
+	pj, err := json.Marshal(payload{Name: mp})
+	if err != nil {
+		return fmt.Errorf("counterpoint: marshal payload: %w", err)
+	}
+	if _, err := r.pool.Exec(ctx, ensureForMeterSQL,
+		tenant, ec, mp, int16(direction), pj); err != nil {
+		return fmt.Errorf("counterpoint: ensure: %w", err)
+	}
+	return nil
+}
+
 const getSQL = `
 SELECT tenant_id, ec_id, metering_point, direction, source_idx,
        period_start, period_end, payload, updated_at

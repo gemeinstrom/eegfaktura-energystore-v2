@@ -129,14 +129,17 @@ func runServe(logger *slog.Logger) error {
 	}
 
 	// energyHandler ingests EDA energy-data messages: tenant from topic,
-	// ecId from payload.
-	energyHandler := makeIngestHandler(st, mtr, logger, "energy", "", decryptCfg)
+	// ecId from payload. cpRepo lets the handler auto-upsert
+	// counterpoint_meta on first sight of a (tenant, ec, mp) triple —
+	// without it fresh tenants without an XLSX-Import never get a
+	// meta row and EnergyReportV2 returns null reports per meter.
+	energyHandler := makeIngestHandler(st, cpRepo, mtr, logger, "energy", "", decryptCfg)
 	// inverterHandler ingests PV-inverter messages: tenant from topic,
 	// ecId hard-coded to "inverter" (mirrors v1 importEnergyV2 call
 	// site). Inverter messages are not encrypted in the prod stack
 	// (the encrypt-only-CR_MSG check), so pass an empty config to
 	// short-circuit the decode pre-step.
-	inverterHandler := makeIngestHandler(st, mtr, logger, "inverter", "inverter", decode.DecryptConfig{})
+	inverterHandler := makeIngestHandler(st, cpRepo, mtr, logger, "inverter", "inverter", decode.DecryptConfig{})
 
 	hostname, _ := os.Hostname()
 	energySub, err := mqttsub.NewWithOptions(cfg.MQTT, energyHandler, hostname+"-energy", mqttsub.Options{
@@ -246,7 +249,15 @@ func runServe(logger *slog.Logger) error {
 // v1's hard-coded "inverter" ecId in calculation/mqttimporter.go:54) is
 // applied to every slot after decode so the row lands in a deterministic
 // (tenant, "inverter") namespace.
-func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logger,
+//
+// `cpRepo` is used to auto-upsert a counterpoint_meta row on first sight
+// of a (tenant, ec, meteringPoint) triple. Without it fresh tenants —
+// whose meta would otherwise only be populated by the XLSX-Importer —
+// get empty meta and EnergyReportV2 returns `report: null` per meter,
+// which crashes the customer-web SPA (Cannot read properties of null
+// reading 'summary').
+func makeIngestHandler(st *store.Store, cpRepo *counterpoint.Repository,
+	mtr *metrics.Metrics, logger *slog.Logger,
 	source, ecidOverride string, decryptCfg decode.DecryptConfig) mqttsub.Handler {
 	return func(hctx context.Context, topic string, payload []byte) error {
 		start := time.Now()
@@ -274,7 +285,7 @@ func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logge
 			return fmt.Errorf("decrypt: %w", err)
 		}
 
-		slots, err := decode.DecodeSlots(tenant, raw)
+		hdr, slots, err := decode.DecodeMessage(tenant, raw)
 		if err != nil {
 			writeDLQ(hctx, st, mtr, logger, topic, "decode", err.Error(), payload)
 			mtr.MQTTMessagesTotal.WithLabelValues(source, "decode_error").Inc()
@@ -283,6 +294,7 @@ func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logge
 		}
 
 		if ecidOverride != "" {
+			hdr.ECID = ecidOverride
 			for i := range slots {
 				slots[i].ECID = ecidOverride
 			}
@@ -300,6 +312,34 @@ func makeIngestHandler(st *store.Store, mtr *metrics.Metrics, logger *slog.Logge
 			mtr.MQTTUpsertErrors.Inc()
 			return fmt.Errorf("upsert: %w", err)
 		}
+
+		// Auto-upsert counterpoint_meta for this meter. Direction comes
+		// from the payload (CONSUMPTION / GENERATION / inverter-default
+		// when ecidOverride forces the source to "inverter"). Parse
+		// errors are swallowed (logged) — the slot UpsertSlots already
+		// succeeded and we don't want to DLQ the whole message just
+		// because a meter doesn't declare its direction. The customer-
+		// web will then see this meter without a meta row, same state
+		// as a v1 BadgerDB stub.
+		direction := hdr.Direction
+		if direction == "" && ecidOverride == "inverter" {
+			// v1 inverter convention: producer.
+			direction = "GENERATION"
+		}
+		if direction != "" {
+			if dir, derr := counterpoint.ParseDirection(direction); derr == nil {
+				if err := cpRepo.EnsureForMeter(hctx, hdr.TenantID, hdr.ECID, hdr.MeteringPoint, dir); err != nil {
+					logger.Warn("counterpoint EnsureForMeter failed (continuing)",
+						"err", err, "tenant", hdr.TenantID, "ec", hdr.ECID,
+						"meter", hdr.MeteringPoint, "dir", direction)
+				}
+			} else {
+				logger.Warn("counterpoint direction unparseable (skipping ensure)",
+					"err", derr, "direction", direction,
+					"tenant", hdr.TenantID, "meter", hdr.MeteringPoint)
+			}
+		}
+
 		mtr.MQTTMessagesTotal.WithLabelValues(source, "ok").Inc()
 		return nil
 	}

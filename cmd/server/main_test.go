@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/counterpoint"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/decode"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/metrics"
 	"github.com/gemeinstrom/eegfaktura-energystore-v2/internal/store"
@@ -66,7 +67,11 @@ func TestIngestHandlerEnergy_OK(t *testing.T) {
 			pgxmock.AnyArg(), float64(0.118), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 
-	h := makeIngestHandler(st, mtr, logger, "energy", "", decode.DecryptConfig{})
+	// Payload carries no Direction → handler skips EnsureForMeter
+	// (logged as "skipping ensure" but no SQL hit) → mock expects only
+	// the energy_data INSERT.
+	cpRepo := counterpoint.NewRepository(mock)
+	h := makeIngestHandler(st, cpRepo, mtr, logger, "energy", "", decode.DecryptConfig{})
 
 	payload := []byte(`{"message":{"meter":{"meteringPoint":"AT00100"},"ecId":"TE100200","energy":{"data":[{"meterCode":"1-1:1.9.0 G.01","value":[{"from":1667948400000,"to":1667949300000,"method":"L1","value":0.118}]}]}}}`)
 	if err := h(context.Background(), "eegfaktura/vfeeg/energy/TE100200", payload); err != nil {
@@ -93,8 +98,15 @@ func TestIngestHandlerInverter_OverridesECID(t *testing.T) {
 		WithArgs("vfeeg", "inverter", "AT00100", "1-1:1.9.0 G.01",
 			pgxmock.AnyArg(), float64(0.5), int16(1)).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
+	// Inverter handler defaults Direction to GENERATION (= producer = 2)
+	// when the payload doesn't set it; mock expects the counterpoint_meta
+	// ensure call right after the slot batch.
+	mock.ExpectExec(`INSERT INTO counterpoint_meta`).
+		WithArgs("vfeeg", "inverter", "AT00100", int16(2), pgxmock.AnyArg()).
+		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 
-	h := makeIngestHandler(st, mtr, slog.Default(), "inverter", "inverter", decode.DecryptConfig{})
+	cpRepo := counterpoint.NewRepository(mock)
+	h := makeIngestHandler(st, cpRepo, mtr, slog.Default(), "inverter", "inverter", decode.DecryptConfig{})
 
 	payload := []byte(`{"message":{"meter":{"meteringPoint":"AT00100"},"ecId":"TE100200","energy":{"data":[{"meterCode":"1-1:1.9.0 G.01","value":[{"from":1667948400000,"to":1667949300000,"method":"L1","value":0.5}]}]}}}`)
 	if err := h(context.Background(), "eegfaktura/vfeeg/energy/TE100200", payload); err != nil {
@@ -118,7 +130,8 @@ func TestIngestHandler_DecodeFailureToDLQ(t *testing.T) {
 		WithArgs("eegfaktura/vfeeg/energy/TE100200", "decode", pgxmock.AnyArg(), []byte("{garbage")).
 		WillReturnResult(pgconn.NewCommandTag("INSERT 0 1"))
 
-	h := makeIngestHandler(st, mtr, slog.Default(), "energy", "", decode.DecryptConfig{})
+	cpRepo := counterpoint.NewRepository(mock)
+	h := makeIngestHandler(st, cpRepo, mtr, slog.Default(), "energy", "", decode.DecryptConfig{})
 	if err := h(context.Background(), "eegfaktura/vfeeg/energy/TE100200", []byte("{garbage")); err == nil {
 		t.Fatal("expected decode error")
 	}

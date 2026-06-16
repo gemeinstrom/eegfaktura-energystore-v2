@@ -105,6 +105,19 @@ func (e *Engine) EnergyReportV2(ctx context.Context, tenant, ec string,
 		report.Meta = append(report.Meta, &cp)
 	}
 
+	// Pre-initialise every meter's Report to an empty struct (zero-
+	// summary + empty intermediate slices). This matches prod-v1's
+	// /eeg/report wire shape — v1 emitted `{summary:{0,0,0,0},
+	// intermediate:{[],[],[],[]}}` for meters without data in the
+	// query window, the fork v2 was emitting `null` which crashed the
+	// customer-web SPA at `m.report.summary.consumption`.
+	//
+	// `participantConsumer.flushDay` only initialises `m.Report` when
+	// it has data to add; meters outside the window or without a
+	// matching counterpoint stayed at nil. Doing it here covers all
+	// three paths: query-error / ErrNoRows / per-meter-no-data.
+	ensureMeterReports(report)
+
 	cons := &participantConsumer{
 		alloc:     AllocDynamicV2,
 		report:    report,
@@ -119,6 +132,27 @@ func (e *Engine) EnergyReportV2(ctx context.Context, tenant, ec string,
 		return err
 	}
 	return nil
+}
+
+// ensureMeterReports walks the response and sets `m.Report` to an
+// empty Report struct for any meter that still has nil. v1-parity
+// (matches prod's /eeg/report response shape).
+func ensureMeterReports(report *ReportResponse) {
+	for prIdx := range report.ParticipantReports {
+		pr := &report.ParticipantReports[prIdx]
+		for _, m := range pr.Meters {
+			if m.Report == nil {
+				m.SetReport(&Report{
+					Intermediate: IntermediateRecord{
+						Consumption: []float64{},
+						Utilization: []float64{},
+						Allocation:  []float64{},
+						Production:  []float64{},
+					},
+				})
+			}
+		}
+	}
 }
 
 // rowIDTime parses queryengine's "CP/Y/M/D/h/m" row-ID format.

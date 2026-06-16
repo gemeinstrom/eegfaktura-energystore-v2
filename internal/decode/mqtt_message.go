@@ -80,29 +80,46 @@ func QoVForMethod(method string) int16 {
 	}
 }
 
-// DecodeSlots turns an MQTT payload into a flat slice of store.Slot.
-//
-// `tenant` is taken from the broker context (typically the topic structure
-// `eegfaktura/<tenant>/energy/<...>`) because the v1 message envelope does
-// not carry it. The caller (subscriber callback) is responsible for
-// extracting it from the topic before calling Decode.
-func DecodeSlots(tenant string, payload []byte) ([]store.Slot, error) {
+// MessageHeader carries the meter-identifying fields out of the MQTT
+// payload. We need it alongside the Slots so the MQTT-Ingest path
+// can auto-upsert `counterpoint_meta` on first sight of an
+// (tenant, ec, meteringPoint) triple — the bare Slot loses the
+// Direction. See gemeinstrom/eegfaktura-energystore-v2#feedback_counterpoint_meta_only_xlsximport
+// for the background.
+type MessageHeader struct {
+	TenantID      string
+	ECID          string
+	MeteringPoint string
+	Direction     string // CONSUMPTION / GENERATION (or empty if absent)
+}
+
+// DecodeMessage decodes the MQTT payload into a MessageHeader plus
+// the flat slice of Slots. Use this when the caller also needs the
+// meta-info (e.g. counterpoint-auto-upsert path); use DecodeSlots
+// when only the time-series rows are needed.
+func DecodeMessage(tenant string, payload []byte) (MessageHeader, []store.Slot, error) {
 	var resp MqttEnergyResponse
 	if err := json.Unmarshal(payload, &resp); err != nil {
-		return nil, fmt.Errorf("decode: unmarshal: %w", err)
+		return MessageHeader{}, nil, fmt.Errorf("decode: unmarshal: %w", err)
 	}
 	msg := resp.Message
 	if msg.Meter.MeteringPoint == "" {
-		return nil, fmt.Errorf("decode: missing meteringPoint")
+		return MessageHeader{}, nil, fmt.Errorf("decode: missing meteringPoint")
 	}
 	if msg.EcID == "" {
-		return nil, fmt.Errorf("decode: missing ecId")
+		return MessageHeader{}, nil, fmt.Errorf("decode: missing ecId")
 	}
 
+	hdr := MessageHeader{
+		TenantID:      tenant,
+		ECID:          msg.EcID,
+		MeteringPoint: msg.Meter.MeteringPoint,
+		Direction:     msg.Meter.Direction,
+	}
 	out := make([]store.Slot, 0, sliceLenHint(msg.Energy.Data))
 	for _, series := range msg.Energy.Data {
 		if series.MeterCode == "" {
-			return nil, fmt.Errorf("decode: missing meterCode in data entry")
+			return MessageHeader{}, nil, fmt.Errorf("decode: missing meterCode in data entry")
 		}
 		for _, v := range series.Value {
 			out = append(out, store.Slot{
@@ -116,7 +133,20 @@ func DecodeSlots(tenant string, payload []byte) ([]store.Slot, error) {
 			})
 		}
 	}
-	return out, nil
+	return hdr, out, nil
+}
+
+// DecodeSlots turns an MQTT payload into a flat slice of store.Slot.
+// Backward-compat wrapper over DecodeMessage — keeps the existing
+// callers (mainly tests) working without change.
+//
+// `tenant` is taken from the broker context (typically the topic structure
+// `eegfaktura/<tenant>/energy/<...>`) because the v1 message envelope does
+// not carry it. The caller (subscriber callback) is responsible for
+// extracting it from the topic before calling Decode.
+func DecodeSlots(tenant string, payload []byte) ([]store.Slot, error) {
+	_, slots, err := DecodeMessage(tenant, payload)
+	return slots, err
 }
 
 func sliceLenHint(data []MqttEnergyData) int {
