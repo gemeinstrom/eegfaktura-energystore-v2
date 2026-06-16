@@ -238,6 +238,58 @@ func TestQueryEngine_LoadCurveEmpty(t *testing.T) {
 	}
 }
 
+// TestQueryEngine_MonthlyCurve covers the prod-extension month-bucket
+// path used by the Lastverlauf Year view. Producer slots in March, May
+// and June must end up in three separate "M:YYYY:MM:00" buckets.
+func TestQueryEngine_MonthlyCurve(t *testing.T) {
+	eng, mock := newMockEngine(t)
+	defer mock.Close()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 12, 31, 23, 45, 0, 0, time.UTC)
+
+	now := time.Now()
+	expectMeta(mock, metaRows(mock).
+		AddRow("vfeeg", "TE100200", "AT_PROD1",
+			int16(counterpoint.DirectionProducer), 0,
+			(*time.Time)(nil), (*time.Time)(nil), []byte(`{}`), now))
+
+	rows := slotRows(mock)
+	for _, month := range []time.Month{time.March, time.May, time.June} {
+		ts := time.Date(2026, month, 15, 12, 0, 0, 0, time.UTC)
+		rows.AddRow(ts, "AT_PROD1", "1-1:2.9.0 G.01", float64(2.0), int16(1))
+		rows.AddRow(ts, "AT_PROD1", "1-1:2.9.0 P.01", float64(1.0), int16(1))
+	}
+	expectSlots(mock, start, end, rows)
+
+	res, err := eng.QueryMonthlyCurveReport(context.Background(), "vfeeg", "TE100200", start, end)
+	if err != nil {
+		t.Fatalf("monthly: %v", err)
+	}
+	// engine.Query fills gaps with zero slots between real rows, so
+	// April (between the March-15 and May-15 anchors) also gets a
+	// (zero-filled) bucket. Year-View benefits from that — all months
+	// in the data span are visible on the x-axis even if empty.
+	if len(res) != 4 {
+		t.Fatalf("expected 4 month buckets (Mar-Jun), got %d (%+v)", len(res), res)
+	}
+	want := map[string]float64{
+		"M:2026:03:00": 2.0,
+		"M:2026:04:00": 0.0,
+		"M:2026:05:00": 2.0,
+		"M:2026:06:00": 2.0,
+	}
+	for _, b := range res {
+		exp, ok := want[b.Name]
+		if !ok {
+			t.Errorf("unexpected bucket %q", b.Name)
+			continue
+		}
+		if (exp == 0 && b.Produced != 0) || (exp != 0 && (b.Produced < exp-0.1 || b.Produced > exp+0.1)) {
+			t.Errorf("%s produced: got %v want %v", b.Name, b.Produced, exp)
+		}
+	}
+}
+
 func TestParseRawFunction(t *testing.T) {
 	cases := []struct {
 		in   string

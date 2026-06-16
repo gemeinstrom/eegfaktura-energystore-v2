@@ -33,6 +33,22 @@ func (e *Engine) QueryLoadCurveReport(ctx context.Context, tenant, ec string,
 	return lc.GetResult(), nil
 }
 
+// QueryMonthlyCurveReport: aggregate per calendar month, emitting
+// `M:YYYY:MM:00` shaped names. Used by the combined-report dispatcher
+// when the requested range is too long for daily granularity to be
+// meaningful in a single chart (e.g. Year view → 12 month bars).
+func (e *Engine) QueryMonthlyCurveReport(ctx context.Context, tenant, ec string,
+	start, end time.Time) ([]*ReportData, error) {
+	mc := NewMonthlyCurveFunction()
+	if err := e.Query(ctx, tenant, ec, start, end, mc); err != nil {
+		if errors.Is(err, ErrNoRows) {
+			return []*ReportData{}, nil
+		}
+		return nil, err
+	}
+	return mc.GetResult(), nil
+}
+
 // QuerySummaryReport: mirror v1 store.NewEnergySummary path.
 func (e *Engine) QuerySummaryReport(ctx context.Context, tenant, ec string,
 	start, end time.Time) (*ReportData, error) {

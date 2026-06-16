@@ -242,6 +242,51 @@ func (lc *LoadCurve) addToResult(_ *EngineContext, t time.Time, line *RawSourceL
 	return nil
 }
 
+// MonthlyCurve groups slots by calendar month (Berlin local) and emits
+// `M:YYYY:MM:00`-shape Name entries — the prod-extension counterpart to
+// LoadCurve. The customer-web `calcXAxisNameV2` already understands
+// `M:`-codes (LoadCurveReport.functions.ts), but public-v1's only
+// aggregation function is `aggregate(Nh|Nd)` which cannot express
+// "calendar month" (variable length). Used by the combined-report
+// dispatcher when the requested range exceeds ~45 days so the
+// Lastverlauf-Jahres-Ansicht shows month bars instead of 365 daily bars.
+type MonthlyCurve struct {
+	bucket map[string]*ReportData
+	order  []string
+}
+
+func NewMonthlyCurveFunction() *MonthlyCurve {
+	return &MonthlyCurve{bucket: make(map[string]*ReportData)}
+}
+
+func (mc *MonthlyCurve) HandleStart(_ *EngineContext) error { return nil }
+
+func (mc *MonthlyCurve) HandleLine(_ *EngineContext, line *RawSourceLine) error {
+	ts, err := rowIDToTime(line.ID)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%04d-%02d", ts.Year(), int(ts.Month()))
+	rd, ok := mc.bucket[key]
+	if !ok {
+		rd = &ReportData{Name: fmt.Sprintf("M:%04d:%02d:00", ts.Year(), int(ts.Month()))}
+		mc.bucket[key] = rd
+		mc.order = append(mc.order, key)
+	}
+	accumulateReportData(rd, line)
+	return nil
+}
+
+func (mc *MonthlyCurve) HandleEnd(_ *EngineContext) error { return nil }
+
+func (mc *MonthlyCurve) GetResult() []*ReportData {
+	out := make([]*ReportData, 0, len(mc.order))
+	for _, k := range mc.order {
+		out = append(out, mc.bucket[k])
+	}
+	return out
+}
+
 // Summary returns a single ReportData covering the whole queried range.
 type Summary struct {
 	result *ReportData

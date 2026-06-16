@@ -184,7 +184,19 @@ func (s *Server) handleCombinedReport(w http.ResponseWriter, r *http.Request, _ 
 		case "intraday":
 			data, err = s.qe.QueryIntraDayReport(r.Context(), tenant, ecid, start, end)
 		case "loadcurve":
-			data, err = s.qe.QueryLoadCurveReport(r.Context(), tenant, ecid, start, end)
+			// prod-Frontend (LoadCurveReport.functions.ts) versteht
+			// `D:`, `M:` und `W:` X-Axis-Codes. v1 emittiert nur `D:`-
+			// Codes; bei Year-View entstehen so 365 Tagesbalken statt
+			// 12 Monatsbalken. Heuristik analog prod: ab ~45 Tagen Range
+			// switch auf Monats-Aggregation (Quartal: 12-13 Monatsbalken
+			// wäre falsch — Quartal soll Tagesbalken behalten; deshalb
+			// liegt die Grenze bei ~6 Monaten = 184 Tagen).
+			const monthlySwitchDays = 184
+			if end.Sub(start) > time.Duration(monthlySwitchDays)*24*time.Hour {
+				data, err = s.qe.QueryMonthlyCurveReport(r.Context(), tenant, ecid, start, end)
+			} else {
+				data, err = s.qe.QueryLoadCurveReport(r.Context(), tenant, ecid, start, end)
+			}
 		default:
 			continue
 		}
