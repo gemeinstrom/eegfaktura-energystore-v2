@@ -242,6 +242,49 @@ func (lc *LoadCurve) addToResult(_ *EngineContext, t time.Time, line *RawSourceL
 	return nil
 }
 
+// WeeklyCurve groups slots by ISO calendar week and emits
+// `W:YYYY:WW:WW`-shape Name entries. Prod uses this for Quartal-View
+// (Apr-Jun → KW 14..24 etc); the customer-web `calcXAxisNameV2`
+// renders `${ce[2]} KWo`. Same accumulateReportData semantics as the
+// other curve modes.
+type WeeklyCurve struct {
+	bucket map[string]*ReportData
+	order  []string
+}
+
+func NewWeeklyCurveFunction() *WeeklyCurve {
+	return &WeeklyCurve{bucket: make(map[string]*ReportData)}
+}
+
+func (wc *WeeklyCurve) HandleStart(_ *EngineContext) error { return nil }
+
+func (wc *WeeklyCurve) HandleLine(_ *EngineContext, line *RawSourceLine) error {
+	ts, err := rowIDToTime(line.ID)
+	if err != nil {
+		return err
+	}
+	year, week := ts.ISOWeek()
+	key := fmt.Sprintf("%04d-W%02d", year, week)
+	rd, ok := wc.bucket[key]
+	if !ok {
+		rd = &ReportData{Name: fmt.Sprintf("W:%04d:%02d:%02d", year, week, week)}
+		wc.bucket[key] = rd
+		wc.order = append(wc.order, key)
+	}
+	accumulateReportData(rd, line)
+	return nil
+}
+
+func (wc *WeeklyCurve) HandleEnd(_ *EngineContext) error { return nil }
+
+func (wc *WeeklyCurve) GetResult() []*ReportData {
+	out := make([]*ReportData, 0, len(wc.order))
+	for _, k := range wc.order {
+		out = append(out, wc.bucket[k])
+	}
+	return out
+}
+
 // MonthlyCurve groups slots by calendar month (Berlin local) and emits
 // `M:YYYY:MM:00`-shape Name entries — the prod-extension counterpart to
 // LoadCurve. The customer-web `calcXAxisNameV2` already understands

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -138,13 +139,45 @@ func (s *Server) handleLoadCurveReport(w http.ResponseWriter, r *http.Request, _
 		writeJSON(w, http.StatusOK, []*queryengine.ReportData{})
 		return
 	}
-	resp, err := s.qe.QueryLoadCurveReport(r.Context(), tenant, ecid,
-		time.UnixMilli(body.Start), time.UnixMilli(body.End))
+	start := time.UnixMilli(body.Start)
+	end := time.UnixMilli(body.End)
+	resp, err := pickLoadCurve(r.Context(), s.qe, tenant, ecid, start, end)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// pickLoadCurve dispatches between Daily, Weekly and Monthly LoadCurve
+// based on the requested range — matches the period-based aggregation
+// the customer-web property popover triggers via /load-curve-report and
+// the dashboard initialiser via /combined-report. Prod sample headers:
+//
+//	Period   Range    prod-Name shape
+//	-------  ------   ----------------
+//	Monat    ~30 d    D:MM:DD:DOW (daily)
+//	Quartal  ~91 d    W:YYYY:WW:WW (ISO-week)
+//	Halbjahr ~181 d   M:YYYY:MM:MM (calendar month)
+//	Jahr     ~365 d   M:YYYY:MM:MM (calendar month)
+//
+// Threshold picks: > 120 d → monthly (covers Halbjahr 181d + Year 365d),
+// 50 d < range ≤ 120 d → weekly (Quartal 91d), ≤ 50 d → daily (Monat).
+func pickLoadCurve(ctx context.Context, qe *queryengine.Engine,
+	tenant, ecid string, start, end time.Time) ([]*queryengine.ReportData, error) {
+	const (
+		monthlySwitchDays = 120
+		weeklySwitchDays  = 50
+	)
+	d := end.Sub(start)
+	switch {
+	case d > time.Duration(monthlySwitchDays)*24*time.Hour:
+		return qe.QueryMonthlyCurveReport(ctx, tenant, ecid, start, end)
+	case d > time.Duration(weeklySwitchDays)*24*time.Hour:
+		return qe.QueryWeeklyCurveReport(ctx, tenant, ecid, start, end)
+	default:
+		return qe.QueryLoadCurveReport(ctx, tenant, ecid, start, end)
+	}
 }
 
 // handleCombinedReport implements the dashboard's combined fetch:
@@ -184,19 +217,7 @@ func (s *Server) handleCombinedReport(w http.ResponseWriter, r *http.Request, _ 
 		case "intraday":
 			data, err = s.qe.QueryIntraDayReport(r.Context(), tenant, ecid, start, end)
 		case "loadcurve":
-			// prod-Frontend (LoadCurveReport.functions.ts) versteht
-			// `D:`, `M:` und `W:` X-Axis-Codes. v1 emittiert nur `D:`-
-			// Codes; bei Year-View entstehen so 365 Tagesbalken statt
-			// 12 Monatsbalken. Heuristik analog prod: ab ~45 Tagen Range
-			// switch auf Monats-Aggregation (Quartal: 12-13 Monatsbalken
-			// wäre falsch — Quartal soll Tagesbalken behalten; deshalb
-			// liegt die Grenze bei ~6 Monaten = 184 Tagen).
-			const monthlySwitchDays = 184
-			if end.Sub(start) > time.Duration(monthlySwitchDays)*24*time.Hour {
-				data, err = s.qe.QueryMonthlyCurveReport(r.Context(), tenant, ecid, start, end)
-			} else {
-				data, err = s.qe.QueryLoadCurveReport(r.Context(), tenant, ecid, start, end)
-			}
+			data, err = pickLoadCurve(r.Context(), s.qe, tenant, ecid, start, end)
 		default:
 			continue
 		}
