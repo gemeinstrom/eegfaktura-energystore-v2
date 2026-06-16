@@ -202,6 +202,19 @@ func (r *Repository) Upsert(ctx context.Context, cp CounterPoint) error {
 // between a separate MAX query and the INSERT. ON CONFLICT DO NOTHING
 // keeps the existing row (including its source_idx) intact — the
 // upsert-style updater stays on Repository.Upsert.
+// ensureForMeterSQL writes a counterpoint_meta row with PROD-PARITÄTISCH
+// sentinel period dates instead of NULL:
+//
+//	period_start = Jan-1 of the current calendar year
+//	period_end   = 2999-12-31 (the "never expires" sentinel prod ships)
+//
+// Why this matters: the customer-web `periodsSelector` reduces
+// `period_start`/`period_end` across all meters to compute the chart
+// property popover's available year range. With NULL values both fields
+// fall back to empty strings, `generatePeriodOptions` produces no
+// entries, and the Lastverlauf-Property-Popover dropdowns render empty
+// (no Jan-Dez 2026, no Halbjahr/Quartal/Monat option). Prod meta rows
+// always carry these dates, so we mirror the shape on the upsert path.
 const ensureForMeterSQL = `
 INSERT INTO counterpoint_meta
     (tenant_id, ec_id, metering_point, direction, source_idx,
@@ -210,7 +223,9 @@ SELECT $1, $2, $3, $4,
        COALESCE((SELECT MAX(source_idx) + 1
                  FROM counterpoint_meta
                  WHERE tenant_id = $1 AND ec_id = $2 AND direction = $4), 0),
-       NULL, NULL, $5, now()
+       date_trunc('year', now())::date,
+       DATE '2999-12-31',
+       $5, now()
 ON CONFLICT (tenant_id, ec_id, metering_point) DO NOTHING`
 
 // EnsureForMeter creates a counterpoint_meta row for the supplied
