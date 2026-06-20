@@ -3,7 +3,7 @@ module github.com/gemeinstrom/eegfaktura-energystore-v2
 go 1.26
 
 require (
-	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/eclipse/paho.golang v0.23.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/graphql-go/graphql v0.8.1
@@ -13,7 +13,7 @@ require (
 	github.com/rs/cors v1.11.1
 	github.com/spf13/viper v1.21.0
 	github.com/xuri/excelize/v2 v2.10.1
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.21.0
 )
 
 require (
