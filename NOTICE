@@ -3,7 +3,7 @@ gemeinstrom/eegfaktura-energystore-v2
 
 This repository is a re-implementation of the energystore component of the
 eegfaktura platform. It addresses the performance and scalability limitations
-of the embedded BadgerDB-backed v1 (https://github.com/gemeinstrom/eegfaktura-energystore)
+of the embedded BadgerDB-backed v1 (https://github.com/eegfaktura/eegfaktura-energystore)
 by moving the time-series storage to TimescaleDB, enabling multi-replica
 deployments and orders-of-magnitude reductions in per-message data movement.
 
@@ -37,6 +37,3 @@ AGPL §13 (Network Use)
 
 If you deploy this software as a network service, you must offer all users
 interacting with it remotely the corresponding source code under AGPL-3.0.
-The reference deployment of the eegfaktura platform fulfills this obligation
-by linking to the source repositories from the customer-facing web UI footer
-and from /about.
